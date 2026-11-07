@@ -95,6 +95,7 @@ function bandColor(p: Palette): ExpressionSpecification {
 
 export interface RouteData {
   segments: GeoJSON.FeatureCollection;
+  ground: GeoJSON.FeatureCollection;
   stops: GeoJSON.FeatureCollection;
   pulse: GeoJSON.FeatureCollection;
 }
@@ -127,6 +128,7 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
     sources: {
       openmaptiles: { type: "vector", url: "https://tiles.openfreemap.org/planet" },
       segments: { type: "geojson", data: data.segments },
+      ground: { type: "geojson", data: data.ground },
       stops: { type: "geojson", data: data.stops },
       pulse: { type: "geojson", data: data.pulse },
     },
@@ -251,6 +253,19 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
           "text-letter-spacing": 0.08,
         },
         paint: { "text-color": p.labelCountry, "text-halo-color": p.halo, "text-halo-width": 1.2, "text-opacity": 0.85 },
+      },
+      {
+        // Shadow of each jump on the surface; it gives the lifted arc its height.
+        id: "route-ground",
+        type: "line",
+        source: "ground",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: {
+          "line-color": bandColor(p),
+          "line-width": ["interpolate", ["linear"], ["zoom"], 1, 1, 10, 2],
+          "line-dasharray": [1.5, 2.5],
+          "line-opacity": theme === "dark" ? 0.35 : 0.45,
+        },
       },
       {
         id: "route-glow",

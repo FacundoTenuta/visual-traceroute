@@ -3,7 +3,7 @@
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { GeoJSONSource, Map as MapLibreMap } from "maplibre-gl";
 import { useEffect, useRef } from "react";
-import type { LngLat, RouteGeometry } from "@/lib/geo/route";
+import { sliceLine, type LngLat, type RouteGeometry } from "@/lib/geo/route";
 import { buildStyle, EMPTY, type ResolvedTheme, type RouteData } from "./map-style";
 
 export interface MapFocus {
@@ -22,22 +22,34 @@ interface TraceMapProps {
   onSelectHop(hop: number): void;
 }
 
-function toStopsData(route: RouteGeometry): GeoJSON.FeatureCollection {
-  return {
-    type: "FeatureCollection",
-    features: route.stops.map((stop) => ({
-      type: "Feature",
-      properties: {
-        id: stop.id,
-        kind: stop.kind,
-        label: stop.label,
-        band: stop.band,
-        firstHop: stop.hops[0] ?? null,
-        hopsKey: `,${stop.hops.join(",")},`,
-      },
-      geometry: { type: "Point", coordinates: stop.coord },
-    })),
-  };
+type Feature = GeoJSON.Feature;
+const collection = (features: Feature[]): GeoJSON.FeatureCollection => ({ type: "FeatureCollection", features });
+const point = (coordinates: LngLat): Feature => ({ type: "Feature", properties: {}, geometry: { type: "Point", coordinates } });
+
+const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
+
+/** Draw time for one segment, longer for longer jumps. */
+function drawDuration(coords: LngLat[]): number {
+  let length = 0;
+  for (let i = 1; i < coords.length; i++) {
+    length += Math.hypot(coords[i][0] - coords[i - 1][0], coords[i][1] - coords[i - 1][1]);
+  }
+  return Math.min(1800, Math.max(650, 450 + length * 18));
+}
+
+function stopFeatures(route: RouteGeometry): Feature[] {
+  return route.stops.map((stop) => ({
+    type: "Feature",
+    properties: {
+      id: stop.id,
+      kind: stop.kind,
+      label: stop.label,
+      band: stop.band,
+      firstHop: stop.hops[0] ?? null,
+      hopsKey: `,${stop.hops.join(",")},`,
+    },
+    geometry: { type: "Point", coordinates: stop.coord },
+  }));
 }
 
 function prefersReducedMotion() {
@@ -47,9 +59,14 @@ function prefersReducedMotion() {
 export function TraceMap({ theme, route, selectedHop, focus, padding, onSelectHop }: TraceMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
-  const dataRef = useRef<RouteData>({ segments: EMPTY, stops: EMPTY, pulse: EMPTY });
+  const dataRef = useRef<RouteData>({ segments: EMPTY, ground: EMPTY, stops: EMPTY, pulse: EMPTY });
   const latest = useRef({ theme, selectedHop, padding, onSelectHop });
   const framedStops = useRef(0);
+  /** When each segment (by key) starts drawing, and how long it takes. */
+  const schedule = useRef(new Map<string, { start: number; duration: number }>());
+  const queueEnd = useRef(0);
+  /** Pulse clock survives route updates so the pulse does not restart on every hop. */
+  const pulseClock = useRef<number | null>(null);
 
   useEffect(() => {
     latest.current = { theme, selectedHop, padding, onSelectHop };
@@ -102,34 +119,30 @@ export function TraceMap({ theme, route, selectedHop, focus, padding, onSelectHo
     mapRef.current?.setStyle(buildStyle(theme, dataRef.current, selectedHop), { diff: true });
   }, [theme, selectedHop]);
 
-  // Route updates: push new data and frame the route while it grows.
+  // Frame the route while it grows.
   useEffect(() => {
-    const stops = toStopsData(route);
-    dataRef.current = { ...dataRef.current, segments: route.segments, stops };
     const map = mapRef.current;
-    if (!map) return;
-
-    const apply = () => {
-      (map.getSource("segments") as GeoJSONSource | undefined)?.setData(route.segments);
-      (map.getSource("stops") as GeoJSONSource | undefined)?.setData(stops);
-    };
-    if (map.isStyleLoaded()) apply();
-    else map.once("idle", apply);
-
     if (route.stops.length === 0) {
       framedStops.current = 0;
       return;
     }
-    if (route.bounds && route.stops.length !== framedStops.current) {
-      framedStops.current = route.stops.length;
-      const [[w, s], [e, n]] = route.bounds;
-      // Map padding (the panel) is already applied; this is extra breathing room.
-      const framePadding = 60;
-      if (route.stops.length === 1 || (e - w < 0.5 && n - s < 0.5)) {
-        map.easeTo({ center: route.stops[0].coord, zoom: Math.max(map.getZoom(), 2.2), duration: 1200 });
-      } else {
-        map.fitBounds(route.bounds, { padding: framePadding, maxZoom: 4.2, duration: 1400 });
-      }
+    if (!map || !route.bounds || route.stops.length === framedStops.current) return;
+    framedStops.current = route.stops.length;
+    const [[w, s], [e, n]] = route.bounds;
+    // Map padding (the panel) is already applied; this is extra breathing room,
+    // with more on top so lifted arcs are not clipped.
+    const framePadding = { top: 110, right: 60, bottom: 60, left: 60 };
+    if (e - w > 90 || n - s > 60) {
+      // Intercontinental routes: show the whole globe centred on the route.
+      const toRad = Math.PI / 180;
+      const x = route.stops.reduce((sum, stop) => sum + Math.cos(stop.coord[0] * toRad), 0);
+      const y = route.stops.reduce((sum, stop) => sum + Math.sin(stop.coord[0] * toRad), 0);
+      const lat = route.stops.reduce((sum, stop) => sum + stop.coord[1], 0) / route.stops.length;
+      map.easeTo({ center: [Math.atan2(y, x) / toRad, Math.max(-50, Math.min(50, lat))], zoom: 1.35, duration: 1600 });
+    } else if (route.stops.length === 1 || (e - w < 0.5 && n - s < 0.5)) {
+      map.easeTo({ center: route.stops[0].coord, zoom: Math.max(map.getZoom(), 2.2), duration: 1200 });
+    } else {
+      map.fitBounds(route.bounds, { padding: framePadding, maxZoom: 4.2, duration: 1400 });
     }
   }, [route]);
 
@@ -137,55 +150,99 @@ export function TraceMap({ theme, route, selectedHop, focus, padding, onSelectHo
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !focus) return;
-    map.flyTo({
-      center: focus.coord,
-      zoom: Math.max(map.getZoom(), 9),
-      speed: 1.2,
-      essential: false,
-    });
+    map.flyTo({ center: focus.coord, zoom: Math.max(map.getZoom(), 9), speed: 1.2, essential: false });
   }, [focus]);
 
-  // Signal pulse travelling along the route.
+  /**
+   * One animation loop for the route: every new segment draws itself from the
+   * previous hop toward the next (queued, so they follow the packet's
+   * direction), each stop appears when its segment arrives, and once the
+   * route is complete a pulse keeps travelling along it.
+   */
   useEffect(() => {
-    const coords = route.line.geometry.coordinates;
-    const setPulse = (data: GeoJSON.FeatureCollection) => {
-      dataRef.current = { ...dataRef.current, pulse: data };
-      (mapRef.current?.getSource("pulse") as GeoJSONSource | undefined)?.setData(data);
-    };
-    if (coords.length < 2 || prefersReducedMotion()) {
-      setPulse(EMPTY);
-      return;
+    const reduced = prefersReducedMotion();
+    const segments = route.segments.features;
+    const grounds = route.ground.features;
+    const stops = stopFeatures(route);
+
+    if (segments.length === 0 && stops.length <= 1) {
+      schedule.current.clear();
+      queueEnd.current = 0;
+      pulseClock.current = null;
     }
 
-    const cumulative = [0];
-    for (let i = 1; i < coords.length; i++) {
-      const [x1, y1] = coords[i - 1];
-      const [x2, y2] = coords[i];
-      cumulative.push(cumulative[i - 1] + Math.hypot(x2 - x1, y2 - y1));
+    const now = performance.now();
+    const live = new Set(segments.map((f) => f.properties.key));
+    for (const key of schedule.current.keys()) if (!live.has(key)) schedule.current.delete(key);
+    for (const feature of segments) {
+      const key = feature.properties.key;
+      if (schedule.current.has(key)) continue;
+      const duration = reduced ? 0 : drawDuration(feature.geometry.coordinates as LngLat[]);
+      const start = Math.max(now, queueEnd.current);
+      schedule.current.set(key, { start, duration });
+      queueEnd.current = start + duration;
     }
-    const total = cumulative.at(-1)!;
-    const duration = Math.min(9000, Math.max(3000, total * 40));
+
+    const push = (data: Partial<RouteData>) => {
+      dataRef.current = { ...dataRef.current, ...data };
+      const map = mapRef.current;
+      if (!map) return;
+      for (const [id, value] of Object.entries(data)) {
+        (map.getSource(id) as GeoJSONSource | undefined)?.setData(value);
+      }
+    };
+
+    const fullLine = route.line.geometry.coordinates as LngLat[];
+    let settled = false;
     let frame = 0;
-    const startedAt = performance.now();
 
-    const tick = (now: number) => {
-      const t = ((now - startedAt) % duration) / duration;
-      const target = t * total;
-      let i = cumulative.findIndex((d) => d >= target);
-      if (i <= 0) i = 1;
-      const span = cumulative[i] - cumulative[i - 1] || 1;
-      const k = (target - cumulative[i - 1]) / span;
-      const [x1, y1] = coords[i - 1];
-      const [x2, y2] = coords[i];
-      setPulse({
-        type: "FeatureCollection",
-        features: [
-          { type: "Feature", properties: {}, geometry: { type: "Point", coordinates: [x1 + (x2 - x1) * k, y1 + (y2 - y1) * k] } },
-        ],
+    const render = (time: number) => {
+      const progress = segments.map((f) => {
+        const slot = schedule.current.get(f.properties.key)!;
+        return slot.duration === 0 ? 1 : Math.min(1, Math.max(0, (time - slot.start) / slot.duration));
       });
-      frame = requestAnimationFrame(tick);
+      const drawing = progress.some((p) => p < 1);
+
+      if (drawing || !settled) {
+        const visibleSegments: Feature[] = [];
+        const visibleGround: Feature[] = [];
+        const tips: Feature[] = [];
+        segments.forEach((f, i) => {
+          const p = progress[i];
+          if (p <= 0) return;
+          const eased = easeInOutCubic(p);
+          const arc = sliceLine(f.geometry.coordinates as LngLat[], eased);
+          const track = sliceLine(grounds[i].geometry.coordinates as LngLat[], eased);
+          visibleSegments.push({ ...f, geometry: { type: "LineString", coordinates: arc } });
+          visibleGround.push({ ...grounds[i], geometry: { type: "LineString", coordinates: track } });
+          if (p < 1) tips.push(point(arc.at(-1)!));
+        });
+        // A stop shows once the segment leading to it has arrived.
+        const firstStopVisible = stops.slice(0, 1);
+        const reachedStops = stops.slice(1).filter((_, i) => progress[i] >= 1);
+        push({
+          segments: collection(visibleSegments),
+          ground: collection(visibleGround),
+          stops: collection([...firstStopVisible, ...reachedStops]),
+          pulse: collection(tips),
+        });
+        settled = !drawing;
+      }
+
+      if (!drawing && !reduced && fullLine.length > 1) {
+        pulseClock.current ??= time;
+        const duration = Math.min(9000, Math.max(3000, fullLine.length * 25));
+        const t = ((time - pulseClock.current) % duration) / duration;
+        const travelled = sliceLine(fullLine, easeInOutCubic(t));
+        push({ pulse: collection([point(travelled.at(-1)!)]) });
+      } else if (!drawing && settled && (reduced || fullLine.length <= 1)) {
+        push({ pulse: EMPTY });
+        return;
+      }
+      frame = requestAnimationFrame(render);
     };
-    frame = requestAnimationFrame(tick);
+
+    frame = requestAnimationFrame(render);
     return () => cancelAnimationFrame(frame);
   }, [route]);
 

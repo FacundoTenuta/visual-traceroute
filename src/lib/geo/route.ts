@@ -15,10 +15,19 @@ export interface RouteStop {
   countryCode: string | null;
 }
 
+export interface SegmentProps {
+  band: LatencyBand;
+  /** Stable id (`from>to`) so the map animates each segment only once. */
+  key: string;
+}
+
 export interface RouteGeometry {
   stops: RouteStop[];
   line: GeoJSON.Feature<GeoJSON.LineString>;
-  segments: GeoJSON.FeatureCollection<GeoJSON.LineString, { band: LatencyBand }>;
+  /** Lifted "jump" arcs, one per pair of consecutive stops. */
+  segments: GeoJSON.FeatureCollection<GeoJSON.LineString, SegmentProps>;
+  /** The same segments flat on the surface, drawn as a faint shadow. */
+  ground: GeoJSON.FeatureCollection<GeoJSON.LineString, SegmentProps>;
   bounds: [LngLat, LngLat] | null;
   distanceKm: number;
 }
@@ -67,6 +76,77 @@ export function greatCircle(a: LngLat, b: LngLat, steps: number): LngLat[] {
     points.push([lon, lat]);
   }
   return points;
+}
+
+const planarLength = (a: LngLat, b: LngLat) => {
+  const cos = Math.cos(rad((a[1] + b[1]) / 2));
+  return Math.hypot((b[0] - a[0]) * cos, b[1] - a[1]);
+};
+
+const MIN_LIFT_LENGTH_DEG = 0.5;
+const MAX_LIFT_DEG = 14;
+const LIFT_FACTOR = 0.16;
+
+/**
+ * Bows a ground track upward (poleward on screen) like a ballistic jump: the
+ * endpoints stay put and the offset peaks mid-way, growing with the segment
+ * length. Tiny hops inside one city stay flat.
+ */
+export function liftedArc(ground: LngLat[]): LngLat[] {
+  if (ground.length < 3) return ground.map((p) => [...p] as LngLat);
+  const cumulative = [0];
+  for (let i = 1; i < ground.length; i++) cumulative.push(cumulative[i - 1] + planarLength(ground[i - 1], ground[i]));
+  const total = cumulative.at(-1)!;
+  if (total < MIN_LIFT_LENGTH_DEG) return ground.map((p) => [...p] as LngLat);
+
+  const height = Math.min(MAX_LIFT_DEG, total * LIFT_FACTOR);
+  const first = ground[0];
+  const last = ground.at(-1)!;
+  // Chord normal decides the side once, so the whole arc bows the same way.
+  const chord: LngLat = [(last[0] - first[0]) * Math.cos(rad((first[1] + last[1]) / 2)), last[1] - first[1]];
+  let side: LngLat = [-chord[1], chord[0]];
+  if (side[1] < 0 || (Math.abs(side[1]) < 1e-9 && side[0] < 0)) side = [-side[0], -side[1]];
+
+  return ground.map((point, i) => {
+    if (i === 0 || i === ground.length - 1) return [...point] as LngLat;
+    const prev = ground[i - 1];
+    const next = ground[i + 1];
+    const cos = Math.cos(rad(point[1]));
+    let nx = -(next[1] - prev[1]);
+    let ny = (next[0] - prev[0]) * cos;
+    const len = Math.hypot(nx, ny) || 1;
+    nx /= len;
+    ny /= len;
+    if (nx * side[0] + ny * side[1] < 0) {
+      nx = -nx;
+      ny = -ny;
+    }
+    const offset = Math.sin(Math.PI * (cumulative[i] / total)) * height;
+    const lat = Math.max(-85, Math.min(85, point[1] + ny * offset));
+    return [point[0] + (nx * offset) / Math.max(cos, 0.05), lat];
+  });
+}
+
+/** The first `fraction` (0..1) of a line by length, ending on an interpolated tip. */
+export function sliceLine(line: LngLat[], fraction: number): LngLat[] {
+  if (line.length === 0) return [];
+  if (fraction <= 0) return [line[0]];
+  if (fraction >= 1) return line.map((p) => [...p] as LngLat);
+  const lengths = line.slice(1).map((p, i) => Math.hypot(p[0] - line[i][0], p[1] - line[i][1]));
+  let remaining = lengths.reduce((a, b) => a + b, 0) * fraction;
+  const out: LngLat[] = [line[0]];
+  for (let i = 0; i < lengths.length; i++) {
+    if (remaining <= lengths[i]) {
+      const k = lengths[i] === 0 ? 0 : remaining / lengths[i];
+      const [x1, y1] = line[i];
+      const [x2, y2] = line[i + 1];
+      out.push([x1 + (x2 - x1) * k, y1 + (y2 - y1) * k]);
+      return out;
+    }
+    remaining -= lengths[i];
+    out.push(line[i + 1]);
+  }
+  return out;
 }
 
 export function latencyBand(ms: number | null | undefined): LatencyBand {
@@ -127,17 +207,17 @@ export function buildRoute(origin: GeoInfo | null, hops: EnrichedHop[]): RouteGe
 
   const coordinates: LngLat[] = [];
   const segments: RouteGeometry["segments"]["features"] = [];
+  const ground: RouteGeometry["ground"]["features"] = [];
   let distanceKm = 0;
   for (let i = 1; i < stops.length; i++) {
     const from = coordinates.at(-1) ?? stops[i - 1].coord;
     const km = haversineKm(stops[i - 1].coord, stops[i].coord);
     distanceKm += km;
-    const arc = greatCircle(from, stops[i].coord, Math.min(128, Math.max(8, Math.ceil(km / 80))));
-    segments.push({
-      type: "Feature",
-      properties: { band: stops[i].band },
-      geometry: { type: "LineString", coordinates: arc },
-    });
+    const track = greatCircle(from, stops[i].coord, Math.min(128, Math.max(16, Math.ceil(km / 60))));
+    const arc = liftedArc(track);
+    const properties = { band: stops[i].band, key: `${stops[i - 1].id}>${stops[i].id}` };
+    segments.push({ type: "Feature", properties, geometry: { type: "LineString", coordinates: arc } });
+    ground.push({ type: "Feature", properties, geometry: { type: "LineString", coordinates: track } });
     coordinates.push(...(coordinates.length ? arc.slice(1) : arc));
   }
 
@@ -155,6 +235,7 @@ export function buildRoute(origin: GeoInfo | null, hops: EnrichedHop[]): RouteGe
     stops,
     line: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates } },
     segments: { type: "FeatureCollection", features: segments },
+    ground: { type: "FeatureCollection", features: ground },
     bounds,
     distanceKm,
   };

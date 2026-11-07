@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EnrichedHop, GeoInfo } from "@/lib/traceroute/types";
-import { buildRoute, greatCircle, haversineKm, latencyBand } from "./route";
+import { buildRoute, greatCircle, haversineKm, latencyBand, liftedArc, sliceLine } from "./route";
 
 const geo = (ip: string, lat: number, lon: number, city = "X"): GeoInfo => ({
   ip,
@@ -121,6 +121,80 @@ describe("buildRoute", () => {
     expect(route.bounds).toEqual([
       [-74, 40.7],
       [2.17, 41.39],
+    ]);
+  });
+});
+
+describe("liftedArc", () => {
+  const ground = greatCircle([-3.7, 40.4], [-74, 40.7], 32);
+
+  it("keeps both endpoints on the ground", () => {
+    const arc = liftedArc(ground);
+    expect(arc).toHaveLength(ground.length);
+    expect(arc[0]).toEqual(ground[0]);
+    expect(arc.at(-1)).toEqual(ground.at(-1));
+  });
+
+  it("rises most at the middle of the segment", () => {
+    const arc = liftedArc(ground);
+    const lift = arc.map((p, i) => Math.hypot(p[0] - ground[i][0], p[1] - ground[i][1]));
+    const mid = Math.floor(lift.length / 2);
+    expect(lift[mid]).toBeGreaterThan(1);
+    expect(lift[mid]).toBeGreaterThan(lift[4]);
+    expect(lift[4]).toBeGreaterThan(lift[1]);
+  });
+
+  it("lifts longer segments higher", () => {
+    const short = greatCircle([-3.7, 40.4], [2.17, 41.39], 32);
+    const liftAt = (g: ReturnType<typeof greatCircle>) => {
+      const arc = liftedArc(g);
+      const m = Math.floor(g.length / 2);
+      return Math.hypot(arc[m][0] - g[m][0], arc[m][1] - g[m][1]);
+    };
+    expect(liftAt(ground)).toBeGreaterThan(liftAt(short));
+  });
+
+  it("leaves tiny hops flat", () => {
+    const tiny = greatCircle([-3.7, 40.4], [-3.69, 40.41], 8);
+    expect(liftedArc(tiny)).toEqual(tiny);
+  });
+});
+
+describe("buildRoute segments", () => {
+  const a = geo("81.46.66.5", 40.4, -3.7);
+  const b = geo("8.8.8.8", 40.7, -74);
+
+  it("gives each segment a stable key, a lifted arc and its ground track", () => {
+    const route = buildRoute(null, [hop(3, a.ip, a), hop(4, b.ip, b)]);
+    const [segment] = route.segments.features;
+    expect(segment.properties.key).toBe("hop-3>hop-4");
+    expect(route.ground.features[0].properties.key).toBe("hop-3>hop-4");
+    expect(segment.geometry.coordinates[0]).toEqual([-3.7, 40.4]);
+    expect(segment.geometry.coordinates).not.toEqual(route.ground.features[0].geometry.coordinates);
+  });
+});
+
+describe("sliceLine", () => {
+  const line: [number, number][] = [
+    [0, 0],
+    [10, 0],
+    [10, 10],
+  ];
+
+  it("returns the start point at 0 and the whole line at 1", () => {
+    expect(sliceLine(line, 0)).toEqual([[0, 0]]);
+    expect(sliceLine(line, 1)).toEqual(line);
+  });
+
+  it("cuts by length, interpolating the tip", () => {
+    expect(sliceLine(line, 0.25)).toEqual([
+      [0, 0],
+      [5, 0],
+    ]);
+    expect(sliceLine(line, 0.75)).toEqual([
+      [0, 0],
+      [10, 0],
+      [10, 5],
     ]);
   });
 });

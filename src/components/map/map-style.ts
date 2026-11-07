@@ -1,6 +1,6 @@
 import type { ExpressionSpecification, StyleSpecification } from "maplibre-gl";
 import { LATENCY_STOPS, UNKNOWN_LATENCY } from "@/lib/latency-scale";
-import { PLACE_NAME_OVERRIDES } from "@/lib/place-names";
+import { MALVINAS_CAPITAL, PLACE_NAME_OVERRIDES } from "@/lib/place-names";
 
 export type ResolvedTheme = "light" | "dark";
 
@@ -74,10 +74,11 @@ export const PALETTES: Record<ResolvedTheme, Palette> = { dark: DARK, light: LIG
 const SOURCE_NAME: ExpressionSpecification = ["coalesce", ["get", "name:latin"], ["get", "name"]];
 /** Label text, with PLACE_NAME_OVERRIDES applied (e.g. "Islas Malvinas"). */
 const NAME: ExpressionSpecification = [
-  "match",
-  ["coalesce", ["get", "name:en"], ["get", "name"]],
-  ...Object.entries(PLACE_NAME_OVERRIDES).flat(),
-  SOURCE_NAME,
+  "case",
+  // Only the Stanley tagged with this Spanish name is the Malvinas capital.
+  ["==", ["get", "name:es"], MALVINAS_CAPITAL.spanish],
+  MALVINAS_CAPITAL.spanish,
+  ["match", ["coalesce", ["get", "name:en"], ["get", "name"]], ...Object.entries(PLACE_NAME_OVERRIDES).flat(), SOURCE_NAME],
 ] as unknown as ExpressionSpecification;
 const FONT_REGULAR = ["Noto Sans Regular"];
 const FONT_BOLD = ["Noto Sans Bold"];
@@ -204,8 +205,26 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
         type: "line",
         source: "openmaptiles",
         "source-layer": "boundary",
-        filter: ["all", ["==", ["get", "admin_level"], 2], ["!=", ["get", "maritime"], 1]],
+        filter: [
+          "all",
+          ["==", ["get", "admin_level"], 2],
+          ["!=", ["get", "maritime"], 1],
+          ["!=", ["get", "disputed"], 1],
+        ],
         paint: { "line-color": p.border, "line-width": ["interpolate", ["linear"], ["zoom"], 0, 0.6, 6, 1.4] },
+      },
+      {
+        // Disputed country borders (e.g. around the Malvinas) are dashed, not drawn as settled borders.
+        id: "boundary-disputed",
+        type: "line",
+        source: "openmaptiles",
+        "source-layer": "boundary",
+        filter: ["all", ["==", ["get", "admin_level"], 2], ["==", ["get", "disputed"], 1]],
+        paint: {
+          "line-color": p.border,
+          "line-width": ["interpolate", ["linear"], ["zoom"], 0, 0.6, 6, 1.4],
+          "line-dasharray": [3, 2],
+        },
       },
       {
         id: "road-label",

@@ -150,7 +150,11 @@ describe("createIpApiClient", () => {
       response({ ...okBody, query: "80.73.208.1", country: "Falkland Islands", countryCode: "FK", city: "Stanley" }),
     );
     const { client } = setup(fetchImpl);
-    expect(await client.geolocate("80.73.208.1")).toMatchObject({ country: "Islas Malvinas", countryCode: "FK" });
+    expect(await client.geolocate("80.73.208.1")).toMatchObject({
+      country: "Islas Malvinas",
+      countryCode: "FK",
+      city: "Puerto Argentino",
+    });
   });
 
   it("rejects out-of-range coordinates", async () => {

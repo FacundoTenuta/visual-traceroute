@@ -115,13 +115,37 @@ describe("GET /api/trace limits", () => {
   });
 
   it("without TRUST_PROXY, ignores forwarding headers and applies only the global cap", async () => {
-    const traces = [open({ "x-forwarded-for": "198.51.100.1" }), open({ "x-forwarded-for": "198.51.100.1" }), open()];
+    // Three traces from the same forwarded client: a per-client cap of 2 would reject the third.
+    const same = { "x-forwarded-for": "198.51.100.1" };
+    const traces = [open(same), open(same), open(same)];
     for (const trace of traces) expect((await trace.response).status).toBe(200);
 
     const fourth = await open({ "x-forwarded-for": "203.0.113.9" }).response;
     expect(fourth.status).toBe(429);
     expect(await fourth.json()).toEqual({ error: "Too many traces running. Try again in a moment." });
 
+    traces.forEach((trace) => trace.controller.abort());
+    await waitForIdle();
+  });
+
+  it("with TRUST_PROXY=1, falls back to X-Real-IP when X-Forwarded-For is missing", async () => {
+    vi.stubEnv("TRUST_PROXY", "1");
+    const real = { "x-real-ip": " 203.0.113.5 " };
+    const traces = [open(real), open({ "x-real-ip": "203.0.113.5" })];
+    for (const trace of traces) expect((await trace.response).status).toBe(200);
+    const third = await open(real).response;
+    expect(third.status).toBe(429);
+    expect(await third.json()).toEqual({
+      error: "You already have 2 traces running. Stop one or wait for it to finish.",
+    });
+    traces.forEach((trace) => trace.controller.abort());
+    await waitForIdle();
+  });
+
+  it("with TRUST_PROXY=1 but no forwarding headers, applies only the global cap", async () => {
+    vi.stubEnv("TRUST_PROXY", "1");
+    const traces = [open(), open(), open()];
+    for (const trace of traces) expect((await trace.response).status).toBe(200);
     traces.forEach((trace) => trace.controller.abort());
     await waitForIdle();
   });

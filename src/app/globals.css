@@ -665,6 +665,38 @@ input {
   transform: translateX(-100%);
 }
 
+.legend__note {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-faint);
+}
+
+/* Pin tooltip */
+
+.pin-popup .maplibregl-popup-content {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--surface-strong);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  font-size: 12.5px;
+}
+
+.pin-popup .maplibregl-popup-tip {
+  display: none;
+}
+
+.pin-tip {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.pin-tip span {
+  color: var(--text-muted);
+}
+
 /* MapLibre controls in the theme */
 
 .maplibregl-ctrl-group {

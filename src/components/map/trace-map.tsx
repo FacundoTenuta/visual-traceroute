@@ -4,7 +4,8 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import type { MapboxOverlay } from "@deck.gl/mapbox";
 import type { GeoJSONSource, Map as MapLibreMap } from "maplibre-gl";
 import { useEffect, useRef } from "react";
-import { sliceLine, zoomForSpan, type Arc3D, type LngLat, type Position3, type RouteGeometry } from "@/lib/geo/route";
+import { formatMs } from "@/lib/format";
+import { sliceLine, zoomForSpan, type LngLat, type Position3, type RouteGeometry, type RouteStop } from "@/lib/geo/route";
 import { latencyRgba } from "@/lib/latency-scale";
 import { buildStyle, EMPTY, type ResolvedTheme, type RouteData } from "./map-style";
 
@@ -72,42 +73,56 @@ function initialCenter(): LngLat {
   return [Math.max(-170, Math.min(170, lon)), 28];
 }
 
-function stopFeatures(route: RouteGeometry): Feature[] {
-  return route.stops.map((stop) => ({
+function stopFeature(stop: RouteStop): Feature {
+  return {
     type: "Feature",
     properties: {
       id: stop.id,
       kind: stop.kind,
       label: stop.label,
       rtt: stop.rtt,
+      city: stop.city,
+      countryCode: stop.countryCode,
       firstHop: stop.hops[0] ?? null,
+      lastHop: stop.hops.at(-1) ?? null,
       hopsKey: `,${stop.hops.join(",")},`,
     },
     geometry: { type: "Point", coordinates: stop.coord },
-  }));
+  };
+}
+
+/** Tooltip for a pin, built from DOM nodes (provider strings are never parsed as HTML). */
+function pinTooltip(props: Record<string, unknown>): HTMLElement {
+  const root = document.createElement("div");
+  root.className = "pin-tip";
+  const title = document.createElement("strong");
+  const label = String(props.label ?? "");
+  title.textContent = `${label.includes(",") || label.includes("–") ? "Hops" : "Hop"} ${label}`;
+  root.append(title);
+  const place = [props.city, props.countryCode].filter((v) => typeof v === "string" && v).join(", ");
+  if (place) root.append(Object.assign(document.createElement("span"), { textContent: place }));
+  if (typeof props.rtt === "number") {
+    root.append(Object.assign(document.createElement("span"), { textContent: `${formatMs(props.rtt)} round trip` }));
+  }
+  return root;
 }
 
 function prefersReducedMotion() {
   return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
+type Rgba = [number, number, number, number];
+
 interface DrawnArc {
   key: string;
   path: Position3[];
-  colors: [number, number, number, number][];
+  /** One colour per segment: the RTT of the hop it arrives at. */
+  color: Rgba;
 }
 
-/** Per-vertex colours so each arc fades from its start RTT colour to its end RTT colour. */
-function colorize(arc: Arc3D, path: Position3[], theme: ResolvedTheme, alpha: number): DrawnArc {
-  const total = arc.path.length - 1 || 1;
-  const colors = path.map((_, i) => {
-    const t = Math.min(1, i / total);
-    const from = arc.fromRtt;
-    const to = arc.rtt;
-    const rtt = from === null || to === null ? (to ?? from) : from + (to - from) * t;
-    return latencyRgba(rtt, theme, alpha);
-  });
-  return { key: arc.key, path, colors };
+interface Pulse {
+  position: Position3;
+  color: Rgba;
 }
 
 export function TraceMap({ theme, route, finished, selectedHop, focus, padding, onSelectHop }: TraceMapProps) {
@@ -115,7 +130,7 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
   const mapRef = useRef<MapLibreMap | null>(null);
   const overlayRef = useRef<MapboxOverlay | null>(null);
   const deckRef = useRef<DeckModules | null>(null);
-  const dataRef = useRef<RouteData>({ segments: EMPTY, stops: EMPTY });
+  const dataRef = useRef<RouteData>({ segments: EMPTY, stops: EMPTY, origin: EMPTY });
   const latest = useRef({ theme, selectedHop, padding, onSelectHop, finished });
   /** When each segment (by key) starts drawing, and how long it takes. */
   const schedule = useRef(new Map<string, { start: number; duration: number }>());
@@ -160,8 +175,31 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
         const hop = e.features?.[0]?.properties?.firstHop;
         if (typeof hop === "number") latest.current.onSelectHop(hop);
       });
-      map.on("mouseenter", "stops", () => map && (map.getCanvas().style.cursor = "pointer"));
-      map.on("mouseleave", "stops", () => map && (map.getCanvas().style.cursor = ""));
+      // A cluster opens up: zoom in until its pins separate.
+      map.on("click", "stop-clusters", async (e) => {
+        const feature = e.features?.[0];
+        const source = map?.getSource("stops") as GeoJSONSource | undefined;
+        if (!map || !feature || !source || feature.geometry.type !== "Point") return;
+        followPaused.current = true;
+        const zoom = await source.getClusterExpansionZoom(feature.properties?.cluster_id);
+        map.easeTo({ center: feature.geometry.coordinates as LngLat, zoom: zoom + 0.3, pitch: 0, duration: 800 });
+      });
+      const tooltip = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 16, className: "pin-popup" });
+      for (const layer of ["stops", "stop-clusters"]) {
+        map.on("mouseenter", layer, () => map && (map.getCanvas().style.cursor = "pointer"));
+        map.on("mouseleave", layer, () => {
+          if (map) map.getCanvas().style.cursor = "";
+          tooltip.remove();
+        });
+      }
+      map.on("mousemove", "stops", (e) => {
+        const feature = e.features?.[0];
+        if (!map || !feature || feature.geometry.type !== "Point") return;
+        tooltip
+          .setLngLat(feature.geometry.coordinates as LngLat)
+          .setDOMContent(pinTooltip(feature.properties ?? {}))
+          .addTo(map);
+      });
       mapRef.current = map;
     });
 
@@ -200,9 +238,13 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
     const reduced = prefersReducedMotion();
     const arcs = route.arcs;
     const segments = route.segments.features;
-    const stops = stopFeatures(route);
+    const originFeatures = route.stops.filter((s) => s.kind === "origin").map(stopFeature);
+    const hopStops = route.stops.filter((s) => s.kind === "hop");
+    const hopFeatures = new Map(hopStops.map((s) => [s.id, stopFeature(s)]));
+    // The first place shows right away; every other one when a segment reaches it.
+    const firstHopStop = arcs[0]?.from ?? hopStops[0]?.id;
 
-    if (arcs.length === 0 && stops.length <= 1) {
+    if (arcs.length === 0 && hopStops.length <= 1) {
       schedule.current.clear();
       queueEnd.current = 0;
       pulseClock.current = null;
@@ -231,13 +273,26 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
     }
 
     const fullPath: Position3[] = arcs.flatMap((arc, i) => (i === 0 ? arc.path : arc.path.slice(1)));
+    // Index of the last vertex of each arc inside fullPath, to colour the pulse.
+    const arcEnds: number[] = [];
+    arcs.reduce((end, arc) => {
+      const next = end + arc.path.length - 1;
+      arcEnds.push(next);
+      return next;
+    }, 0);
 
-    const pushMapData = (data: RouteData) => {
-      dataRef.current = data;
+    let pinsKey = "";
+    const pushMapData = (data: RouteData, key: string) => {
       const map = mapRef.current;
+      dataRef.current = data;
       if (!map) return;
       (map.getSource("segments") as GeoJSONSource | undefined)?.setData(data.segments);
-      (map.getSource("stops") as GeoJSONSource | undefined)?.setData(data.stops);
+      // Pins only change when one is reached: re-clustering every frame would flicker.
+      if (key !== pinsKey) {
+        pinsKey = key;
+        (map.getSource("stops") as GeoJSONSource | undefined)?.setData(data.stops);
+        (map.getSource("origin") as GeoJSONSource | undefined)?.setData(data.origin);
+      }
     };
 
     const ensureOverlay = () => {
@@ -303,8 +358,15 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
           const track = sliceLine(f.geometry.coordinates as LngLat[], easeInOutCubic(progress[i]));
           visibleSegments.push({ ...f, geometry: { type: "LineString", coordinates: track } });
         });
-        const reached = stops.slice(1).filter((_, i) => progress[i] >= 1);
-        pushMapData({ segments: collection(visibleSegments), stops: collection([...stops.slice(0, 1), ...reached]) });
+        const visible = new Set<string>(firstHopStop ? [firstHopStop] : []);
+        arcs.forEach((arc, i) => {
+          if (progress[i] >= 1) visible.add(arc.to);
+        });
+        const pins = [...hopFeatures].filter(([id]) => visible.has(id)).map(([, f]) => f);
+        pushMapData(
+          { segments: collection(visibleSegments), stops: collection(pins), origin: collection(originFeatures) },
+          `${[...visible].sort().join("|")}#${originFeatures.length}#${route.stops.map((s) => s.label).join("|")}`,
+        );
         settled = !drawing;
       }
 
@@ -314,20 +376,24 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
       if (overlay && deck && map) {
         const opacity = arcOpacity(map.getZoom());
         const drawn: DrawnArc[] = [];
-        let tip: Position3 | null = null;
+        let pulse: Pulse | null = null;
         arcs.forEach((arc, i) => {
           if (progress[i] <= 0) return;
           const path = sliceLine(arc.path, easeInOutCubic(progress[i]));
-          if (path.length > 1) drawn.push(colorize(arc, path, currentTheme, 255));
-          if (i === drawingIndex) tip = path.at(-1)!;
+          const color = latencyRgba(arc.rtt, currentTheme);
+          if (path.length > 1) drawn.push({ key: arc.key, path, color });
+          if (i === drawingIndex) pulse = { position: path.at(-1)!, color };
         });
 
-        let pulse: Position3 | null = tip;
         if (!drawing && !reduced && fullPath.length > 1) {
           pulseClock.current ??= time;
           const period = Math.min(10_000, Math.max(3500, fullPath.length * 30));
           const t = ((time - pulseClock.current) % period) / period;
-          pulse = sliceLine(fullPath, easeInOutCubic(t)).at(-1)!;
+          const travelled = sliceLine(fullPath, easeInOutCubic(t));
+          // The pulse takes the colour of the segment it is on.
+          const vertex = travelled.length - 1;
+          const arcIndex = arcEnds.findIndex((end) => vertex <= end);
+          pulse = { position: travelled.at(-1)!, color: latencyRgba(arcs[Math.max(0, arcIndex)].rtt, currentTheme) };
         }
 
         overlay.setProps({
@@ -336,7 +402,7 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
               id: "arc-line",
               data: drawn,
               getPath: (d) => d.path,
-              getColor: (d) => d.colors,
+              getColor: (d) => d.color,
               getWidth: 3,
               widthUnits: "pixels",
               capRounded: true,
@@ -348,19 +414,20 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
               opacity,
               updateTriggers: { getPath: time, getColor: time },
             }),
-            new deck.ScatterplotLayer<Position3>({
+            new deck.ScatterplotLayer<Pulse>({
               id: "arc-pulse",
               data: pulse ? [pulse] : [],
-              getPosition: (d) => d,
+              getPosition: (d) => d.position,
               getRadius: 5,
               radiusUnits: "pixels",
-              getFillColor: currentTheme === "dark" ? [255, 255, 255, 255] : [23, 71, 181, 255],
+              getFillColor: (d) => d.color,
               stroked: true,
               getLineColor: currentTheme === "dark" ? [6, 18, 43, 255] : [255, 255, 255, 255],
               getLineWidth: 1.5,
               lineWidthUnits: "pixels",
+              parameters: { depthWriteEnabled: false },
               opacity,
-              updateTriggers: { getPosition: time },
+              updateTriggers: { getPosition: time, getFillColor: time },
             }),
           ],
         });

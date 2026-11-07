@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EnrichedHop, GeoInfo } from "@/lib/traceroute/types";
-import { ARC_BASE_M, arcAltitudeM, buildRoute, greatCircle, haversineKm, latencyBand, liftTrack, sliceLine, zoomForSpan } from "./route";
+import { ARC_BASE_M, arcAltitudeM, bendTrack, buildRoute, greatCircle, haversineKm, latencyBand, liftTrack, sliceLine, zoomForSpan } from "./route";
 
 const geo = (ip: string, lat: number, lon: number, city = "X"): GeoInfo => ({
   ip,
@@ -156,26 +156,80 @@ describe("buildRoute segments", () => {
   const a = geo("81.46.66.5", 40.4, -3.7);
   const b = geo("8.8.8.8", 40.7, -74);
 
-  it("gives each segment a stable key, its RTT range, a ground track and a 3D arc", () => {
+  it("gives each segment a stable key, one RTT colour, a ground track and a 3D arc", () => {
     const route = buildRoute(null, [hop(3, a.ip, a, 12), hop(4, b.ip, b, 95)]);
     const [segment] = route.segments.features;
-    expect(segment.properties).toMatchObject({ key: "hop-3>hop-4", fromRtt: 12, rtt: 95 });
+    expect(segment.properties).toMatchObject({ key: "hop-3>hop-4#0", rtt: 95 });
+    expect(segment.properties).not.toHaveProperty("fromRtt");
     expect(segment.geometry.coordinates[0]).toEqual([-3.7, 40.4]);
-    expect(route.arcs[0]).toMatchObject({ key: "hop-3>hop-4", fromRtt: 12, rtt: 95 });
+    expect(route.arcs[0]).toMatchObject({ key: "hop-3>hop-4#0", rtt: 95 });
     expect(route.arcs[0].path.map(([x, y]) => [x, y])).toEqual(segment.geometry.coordinates);
     expect(Math.max(...route.arcs[0].path.map((p) => p[2]))).toBeGreaterThan(0);
-  });
-
-  it("starts the gradient at the first hop's colour when leaving the origin", () => {
-    const origin = geo("203.0.113.7", 41.39, 2.17);
-    const route = buildRoute(origin, [hop(1, a.ip, a, 7)]);
-    expect(route.arcs[0]).toMatchObject({ fromRtt: 7, rtt: 7 });
   });
 
   it("records the RTT of the last hop grouped at a stop", () => {
     const a2 = geo("81.46.0.205", 40.4, -3.7);
     const route = buildRoute(null, [hop(3, a.ip, a, 5), hop(4, a2.ip, a2, 9)]);
     expect(route.stops[0].rtt).toBe(9);
+  });
+});
+
+describe("revisited places", () => {
+  const madrid = geo("81.46.66.5", 40.4, -3.7, "Madrid");
+  const madridAgain = geo("81.46.0.205", 40.4, -3.7, "Madrid");
+  const ny = geo("4.68.71.45", 40.7, -74, "New York");
+
+  it("reuses one pin for a place the route comes back to", () => {
+    const route = buildRoute(null, [hop(3, madrid.ip, madrid, 5), hop(4, ny.ip, ny, 90), hop(5, madridAgain.ip, madridAgain, 8)]);
+    expect(route.stops.map((s) => s.label)).toEqual(["3, 5", "4"]);
+    expect(route.stops[0]).toMatchObject({ hops: [3, 5], rtt: 8 });
+  });
+
+  it("colours each segment with the RTT of the hop it arrives at", () => {
+    const route = buildRoute(null, [hop(3, madrid.ip, madrid, 5), hop(4, ny.ip, ny, 90), hop(5, madridAgain.ip, madridAgain, 8)]);
+    expect(route.segments.features.map((f) => f.properties.rtt)).toEqual([90, 8]);
+  });
+
+  it("curves a segment that repeats the same two places so it does not overlap", () => {
+    const route = buildRoute(null, [hop(3, madrid.ip, madrid, 5), hop(4, ny.ip, ny, 90), hop(5, madridAgain.ip, madridAgain, 8)]);
+    const [there, back] = route.segments.features.map((f) => f.geometry.coordinates);
+    expect(route.segments.features.map((f) => f.properties.key)).toEqual(["hop-3>hop-4#0", "hop-4>hop-3#1"]);
+    const mid = (line: number[][]) => line[Math.floor(line.length / 2)];
+    const [x1, y1] = mid(there);
+    const [x2, y2] = mid(back);
+    expect(Math.hypot(x1 - x2, y1 - y2)).toBeGreaterThan(3);
+    expect(back[0]).toEqual([-74, 40.7]);
+    expect(back.at(-1)).toEqual([-3.7, 40.4]);
+  });
+
+  it("compresses hop numbers into ranges on the pin label", () => {
+    const madrid2 = geo("81.46.66.9", 40.4, -3.7, "Madrid");
+    const route = buildRoute(null, [
+      hop(3, madrid.ip, madrid, 5),
+      hop(4, madrid2.ip, madrid2, 6),
+      hop(5, ny.ip, ny, 90),
+      hop(6, madridAgain.ip, madridAgain, 8),
+    ]);
+    expect(route.stops[0].label).toBe("3–4, 6");
+  });
+});
+
+describe("bendTrack", () => {
+  const track = greatCircle([-3.7, 40.4], [-74, 40.7], 32);
+
+  it("keeps the endpoints and leaves the track alone when the amount is zero", () => {
+    expect(bendTrack(track, 0)).toEqual(track);
+    const bent = bendTrack(track, 0.15);
+    expect(bent[0]).toEqual(track[0]);
+    expect(bent.at(-1)).toEqual(track.at(-1));
+  });
+
+  it("bows the middle sideways, to opposite sides for opposite signs", () => {
+    const left = bendTrack(track, 0.15)[16];
+    const right = bendTrack(track, -0.15)[16];
+    const base = track[16];
+    expect(Math.sign(left[1] - base[1])).toBe(-Math.sign(right[1] - base[1]));
+    expect(Math.hypot(left[0] - base[0], left[1] - base[1])).toBeGreaterThan(3);
   });
 });
 

@@ -12,6 +12,7 @@ export function LatencyLegend({ theme }: { theme: ScaleTheme }) {
           </span>
         ))}
       </span>
+      <span className="legend__note">Pin numbers show the hop order.</span>
     </div>
   );
 }

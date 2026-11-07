@@ -6,12 +6,12 @@ export type LatencyBand = "fast" | "medium" | "slow" | "critical" | "unknown";
 export interface RouteStop {
   id: string;
   kind: "origin" | "hop";
-  /** Hop numbers grouped at this location (empty for the origin). */
+  /** Every hop seen at this location, ascending (empty for the origin). */
   hops: number[];
   label: string;
   coord: LngLat;
   band: LatencyBand;
-  /** Average RTT of the last hop grouped at this stop, if any. */
+  /** Average RTT of the latest hop seen at this stop, if any. */
   rtt: number | null;
   city: string | null;
   countryCode: string | null;
@@ -19,12 +19,14 @@ export interface RouteStop {
 
 export interface SegmentProps {
   band: LatencyBand;
-  /** Stable id (`from>to`) so the map animates each segment only once. */
+  /** Stable id (`from>to#n`) so the map animates each segment only once. */
   key: string;
-  /** RTT at the start and end of the segment, for the colour gradient. */
-  fromRtt: number | null;
+  /** RTT of the hop the segment arrives at: one colour per segment. */
   rtt: number | null;
   km: number;
+  /** Stop ids at both ends. */
+  from: string;
+  to: string;
 }
 
 /** Longitude, latitude and altitude in metres. */
@@ -150,19 +152,61 @@ export function latencyBand(ms: number | null | undefined): LatencyBand {
   return "critical";
 }
 
-const sameSpot = (a: LngLat, b: LngLat) => Math.abs(a[0] - b[0]) < 1e-4 && Math.abs(a[1] - b[1]) < 1e-4;
+const spotKey = ([lon, lat]: LngLat) => `${lon.toFixed(4)},${lat.toFixed(4)}`;
 
-const hopLabel = (hops: number[]) =>
-  hops.length === 1 ? String(hops[0]) : `${hops[0]}–${hops[hops.length - 1]}`;
+/** "3, 4, 5, 9" → "3–5, 9". */
+function hopLabel(hops: number[]): string {
+  const parts: string[] = [];
+  for (let i = 0; i < hops.length; i++) {
+    let j = i;
+    while (j + 1 < hops.length && hops[j + 1] === hops[j] + 1) j++;
+    parts.push(i === j ? String(hops[i]) : `${hops[i]}–${hops[j]}`);
+    i = j;
+  }
+  return parts.join(", ");
+}
 
 function primaryGeo(hop: EnrichedHop): GeoInfo | null {
   return hop.addresses[0]?.geo ?? null;
 }
 
+/**
+ * Bows a ground track sideways (perpendicular to its chord), peaking mid-way.
+ * `ratio` is the peak offset as a fraction of the segment length; the sign
+ * picks the side. Used to separate segments repeated between the same places.
+ */
+export function bendTrack(track: LngLat[], ratio: number): LngLat[] {
+  if (ratio === 0 || track.length < 3) return track.map((p) => [...p] as LngLat);
+  const first = track[0];
+  const last = track[track.length - 1];
+  const cos = Math.cos(rad((first[1] + last[1]) / 2)) || 1;
+  const dx = (last[0] - first[0]) * cos;
+  const dy = last[1] - first[1];
+  const length = Math.hypot(dx, dy) || 1;
+  const [nx, ny] = [-dy / length, dx / length];
+  const end = track.length - 1;
+  return track.map((point, i) => {
+    if (i === 0 || i === end) return [...point] as LngLat;
+    const offset = Math.sin(Math.PI * (i / end)) * ratio * length;
+    const lat = Math.max(-85, Math.min(85, point[1] + ny * offset));
+    return [point[0] + (nx * offset) / Math.max(Math.cos(rad(point[1])), 0.05), lat];
+  });
+}
+
+/** Sideways bend for the n-th repetition of a pair: 0, then +, −, ++, −− … */
+const REPEAT_BEND = 0.14;
+const repeatBend = (n: number) => (n === 0 ? 0 : (n % 2 === 1 ? 1 : -1) * Math.ceil(n / 2) * REPEAT_BEND);
+
+interface Visit {
+  stop: RouteStop;
+  rtt: number | null;
+}
+
 export function buildRoute(origin: GeoInfo | null, hops: EnrichedHop[]): RouteGeometry {
   const stops: RouteStop[] = [];
+  const visits: Visit[] = [];
   if (origin) {
-    stops.push({
+    const stop: RouteStop = {
       id: "origin",
       kind: "origin",
       hops: [],
@@ -172,51 +216,68 @@ export function buildRoute(origin: GeoInfo | null, hops: EnrichedHop[]): RouteGe
       rtt: null,
       city: origin.city,
       countryCode: origin.countryCode,
-    });
+    };
+    stops.push(stop);
+    visits.push({ stop, rtt: null });
   }
 
+  // One pin per place: a hop at a location seen before joins that stop.
+  const byPlace = new Map<string, RouteStop>();
   for (const hop of [...hops].sort((a, b) => a.hop - b.hop)) {
     const geo = primaryGeo(hop);
     if (!geo) continue;
     const coord: LngLat = [geo.lon, geo.lat];
-    const band = latencyBand(hop.rtt?.avg);
-    const last = stops.at(-1);
-    if (last && last.kind === "hop" && sameSpot(last.coord, coord)) {
-      last.hops.push(hop.hop);
-      last.label = hopLabel(last.hops);
-      last.band = band;
-      last.rtt = hop.rtt?.avg ?? null;
-      continue;
+    const rtt = hop.rtt?.avg ?? null;
+    let stop = byPlace.get(spotKey(coord));
+    if (stop) {
+      stop.hops.push(hop.hop);
+      stop.label = hopLabel(stop.hops);
+      stop.band = latencyBand(rtt);
+      stop.rtt = rtt;
+    } else {
+      stop = {
+        id: `hop-${hop.hop}`,
+        kind: "hop",
+        hops: [hop.hop],
+        label: String(hop.hop),
+        coord,
+        band: latencyBand(rtt),
+        rtt,
+        city: geo.city,
+        countryCode: geo.countryCode,
+      };
+      stops.push(stop);
+      byPlace.set(spotKey(coord), stop);
     }
-    stops.push({
-      id: `hop-${hop.hop}`,
-      kind: "hop",
-      hops: [hop.hop],
-      label: String(hop.hop),
-      coord,
-      band,
-      rtt: hop.rtt?.avg ?? null,
-      city: geo.city,
-      countryCode: geo.countryCode,
-    });
+    // Consecutive hops at the same place are one visit (the latest RTT wins).
+    const last = visits.at(-1);
+    if (last && last.stop === stop) last.rtt = rtt;
+    else visits.push({ stop, rtt });
   }
 
   const coordinates: LngLat[] = [];
   const segments: RouteGeometry["segments"]["features"] = [];
   const arcs: Arc3D[] = [];
+  const pairCount = new Map<string, number>();
   let distanceKm = 0;
-  for (let i = 1; i < stops.length; i++) {
-    const from = coordinates.at(-1) ?? stops[i - 1].coord;
-    const km = haversineKm(stops[i - 1].coord, stops[i].coord);
+  for (let i = 1; i < visits.length; i++) {
+    const from = visits[i - 1].stop;
+    const to = visits[i].stop;
+    const start = coordinates.at(-1) ?? from.coord;
+    const km = haversineKm(from.coord, to.coord);
     distanceKm += km;
-    const track = greatCircle(from, stops[i].coord, Math.min(128, Math.max(16, Math.ceil(km / 60))));
+    const pair = [from.id, to.id].sort().join("|");
+    const n = pairCount.get(pair) ?? 0;
+    pairCount.set(pair, n + 1);
+    const steps = Math.min(128, Math.max(16, Math.ceil(km / 60)));
+    const track = bendTrack(greatCircle(start, to.coord, steps), repeatBend(n));
     const properties: SegmentProps = {
-      band: stops[i].band,
-      key: `${stops[i - 1].id}>${stops[i].id}`,
-      // The origin has no RTT of its own; the line starts at the first hop's colour.
-      fromRtt: stops[i - 1].rtt ?? stops[i].rtt,
-      rtt: stops[i].rtt,
+      band: latencyBand(visits[i].rtt),
+      key: `${from.id}>${to.id}#${n}`,
+      rtt: visits[i].rtt,
       km,
+      from: from.id,
+      to: to.id,
     };
     segments.push({ type: "Feature", properties, geometry: { type: "LineString", coordinates: track } });
     arcs.push({ ...properties, path: liftTrack(track, km) });

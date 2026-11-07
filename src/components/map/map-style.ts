@@ -22,7 +22,6 @@ interface Palette {
   horizon: string;
   fog: string;
   stopStroke: string;
-  stopText: string;
 }
 
 /** Deep-ocean cable chart. */
@@ -44,7 +43,6 @@ const DARK: Palette = {
   horizon: "#1d4a8c",
   fog: "#0b1f45",
   stopStroke: "#06122b",
-  stopText: "#06122b",
 };
 
 /** Cyanotype print. */
@@ -66,7 +64,6 @@ const LIGHT: Palette = {
   horizon: "#a9c8ee",
   fog: "#eaf2fb",
   stopStroke: "#ffffff",
-  stopText: "#ffffff",
 };
 
 export const PALETTES: Record<ResolvedTheme, Palette> = { dark: DARK, light: LIGHT };
@@ -96,7 +93,33 @@ function rttColor(theme: ResolvedTheme): ExpressionSpecification {
 
 export interface RouteData {
   segments: GeoJSON.FeatureCollection;
+  /** Hop pins (clustered). */
   stops: GeoJSON.FeatureCollection;
+  origin: GeoJSON.FeatureCollection;
+}
+
+/** Pins closer than this (px) merge into a cluster until CLUSTER_MAX_ZOOM. */
+export const CLUSTER_RADIUS = 34;
+export const CLUSTER_MAX_ZOOM = 8;
+
+/** "4" or "4–9": the hop range a cluster holds. */
+const CLUSTER_LABEL: ExpressionSpecification = [
+  "case",
+  ["==", ["get", "minHop"], ["get", "maxHop"]],
+  ["to-string", ["get", "minHop"]],
+  ["concat", ["to-string", ["get", "minHop"]], "–", ["to-string", ["get", "maxHop"]]],
+];
+
+/** Circle radius that grows with its label so "3–5, 9" still fits inside. */
+const fitRadius = (label: ExpressionSpecification, min: number): ExpressionSpecification => [
+  "max",
+  min,
+  ["+", 5, ["*", 3.3, ["length", label]]],
+];
+
+/** Dark text on light (fast/amber) colours, white text on the slow reds. */
+function pinTextColor(rttExpr: ExpressionSpecification): ExpressionSpecification {
+  return ["case", [">=", ["coalesce", rttExpr, 0], 180], "#ffffff", "#06122b"];
 }
 
 export const EMPTY: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
@@ -128,7 +151,19 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
     sources: {
       openmaptiles: { type: "vector", url: "https://tiles.openfreemap.org/planet" },
       segments: { type: "geojson", data: data.segments },
-      stops: { type: "geojson", data: data.stops },
+      stops: {
+        type: "geojson",
+        data: data.stops,
+        cluster: true,
+        clusterRadius: CLUSTER_RADIUS,
+        clusterMaxZoom: CLUSTER_MAX_ZOOM,
+        clusterProperties: {
+          minHop: ["min", ["get", "firstHop"]],
+          maxHop: ["max", ["get", "lastHop"]],
+          maxRtt: ["max", ["coalesce", ["get", "rtt"], 0]],
+        },
+      },
+      origin: { type: "geojson", data: data.origin },
     },
     layers: [
       { id: "background", type: "background", paint: { "background-color": p.land } },
@@ -296,14 +331,53 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
         },
       },
       {
+        id: "origin",
+        type: "circle",
+        source: "origin",
+        paint: {
+          "circle-radius": 7,
+          "circle-color": p.labelPlace,
+          "circle-stroke-width": 3,
+          "circle-stroke-color": p.stopStroke,
+        },
+      },
+      {
+        // A group of nearby pins, labelled with the hops it holds (e.g. "4–9").
+        id: "stop-clusters",
+        type: "circle",
+        source: "stops",
+        filter: ["has", "point_count"],
+        paint: {
+          "circle-radius": fitRadius(CLUSTER_LABEL, 15),
+          "circle-color": ["interpolate", ["linear"], ["get", "maxRtt"], ...LATENCY_STOPS[theme].flatMap(([ms, color]) => [ms, color])] as ExpressionSpecification,
+          "circle-stroke-width": 4,
+          "circle-stroke-color": ["interpolate", ["linear"], ["get", "maxRtt"], ...LATENCY_STOPS[theme].flatMap(([ms, color]) => [ms, color])] as ExpressionSpecification,
+          "circle-stroke-opacity": 0.35,
+        },
+      },
+      {
+        id: "stop-clusters-label",
+        type: "symbol",
+        source: "stops",
+        filter: ["has", "point_count"],
+        layout: {
+          "text-field": CLUSTER_LABEL,
+          "text-font": FONT_BOLD,
+          "text-size": 11,
+          "text-allow-overlap": true,
+          "text-ignore-placement": true,
+        },
+        paint: { "text-color": pinTextColor(["get", "maxRtt"]) },
+      },
+      {
         id: "stops-halo",
         type: "circle",
         source: "stops",
-        filter: isSelected,
+        filter: ["all", ["!", ["has", "point_count"]], isSelected],
         paint: {
-          "circle-radius": 22,
+          "circle-radius": ["+", 9, fitRadius(["get", "label"], 12)],
           "circle-color": rttColor(theme),
-          "circle-opacity": 0.22,
+          "circle-opacity": 0.2,
           "circle-stroke-width": 1.5,
           "circle-stroke-color": rttColor(theme),
         },
@@ -312,26 +386,28 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
         id: "stops",
         type: "circle",
         source: "stops",
+        filter: ["!", ["has", "point_count"]],
         paint: {
-          "circle-radius": ["case", ["==", ["get", "kind"], "origin"], 9, 11],
-          "circle-color": ["case", ["==", ["get", "kind"], "origin"], p.labelPlace, rttColor(theme)],
+          "circle-radius": fitRadius(["get", "label"], 12),
+          "circle-color": rttColor(theme),
           "circle-stroke-width": 2,
           "circle-stroke-color": p.stopStroke,
         },
       },
       {
+        // The pin number is the hop's position in the route.
         id: "stops-label",
         type: "symbol",
         source: "stops",
-        filter: ["==", ["get", "kind"], "hop"],
+        filter: ["!", ["has", "point_count"]],
         layout: {
           "text-field": ["get", "label"],
           "text-font": FONT_BOLD,
-          "text-size": 10,
+          "text-size": 11,
           "text-allow-overlap": true,
           "text-ignore-placement": true,
         },
-        paint: { "text-color": p.stopText, "text-halo-color": "rgba(0, 0, 0, 0.15)", "text-halo-width": 0.5 },
+        paint: { "text-color": pinTextColor(["get", "rtt"]) },
       },
     ],
   };

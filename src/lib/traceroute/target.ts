@@ -17,8 +17,9 @@ function extractHost(input: string): string {
 function isHostname(value: string): boolean {
   if (value.length > MAX_HOSTNAME_LENGTH) return false;
   const labels = value.split(".");
-  // A purely numeric dotted value must be a valid IPv4 literal, not a hostname.
-  if (labels.every((label) => /^\d+$/.test(label))) return false;
+  // Numeric or hex labels only (e.g. "0x7f.1", "2130706433") are IPv4 shorthand
+  // that the resolver would turn into an address; require a strict IPv4 instead.
+  if (labels.every((label) => /^(\d+|0x[0-9a-f]*)$/.test(label))) return false;
   return labels.every((label) => LABEL_RE.test(label));
 }
 

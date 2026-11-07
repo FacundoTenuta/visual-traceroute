@@ -66,8 +66,12 @@ export async function runTraceSession(
   const lookup = (ip: string): Promise<Lookup> => {
     let promise = lookups.get(ip);
     if (!promise) {
-      const geo = isPrivateIPv4(ip) ? Promise.resolve(null) : settle(deps.geolocate(ip));
-      promise = Promise.all([settle(deps.reverseDns(ip)), geo]).then(([hostname, geoInfo]) => {
+      // Private hops belong to the server's own network: never resolve or locate
+      // them, so internal hostnames are not exposed to API callers.
+      const isPrivate = isPrivateIPv4(ip);
+      const geo = isPrivate ? Promise.resolve(null) : settle(deps.geolocate(ip));
+      const hostname = isPrivate ? Promise.resolve(null) : settle(deps.reverseDns(ip));
+      promise = Promise.all([hostname, geo]).then(([hostname, geoInfo]) => {
         const result = { hostname, geo: geoInfo };
         resolved.set(ip, result);
         for (const hop of latest.values()) if (hop.ips.includes(ip)) emitHop(hop);

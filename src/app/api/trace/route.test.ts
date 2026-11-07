@@ -49,3 +49,48 @@ describe("GET /api/trace", () => {
     expect(events.at(-1)).toMatchObject({ type: "done", hops: 1, reached: true });
   });
 });
+
+describe("GET /api/trace limits", () => {
+  function hangingSource(signal: AbortSignal) {
+    async function* lines() {
+      yield { stream: "stderr" as const, line: "traceroute to 1.1.1.1 (1.1.1.1), 30 hops max, 40 byte packets" };
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    }
+    return { lines: lines(), exit: new Promise<number | null>((resolve) => signal.addEventListener("abort", () => resolve(null), { once: true })) };
+  }
+
+  it("limits concurrent traces per client and frees the slot when the client leaves", async () => {
+    spawnTraceroute.mockReset();
+    spawnTraceroute.mockImplementation((_target: string, signal: AbortSignal) => hangingSource(signal));
+    const open = (ip: string) => {
+      const controller = new AbortController();
+      const request = new Request("http://localhost/api/trace?target=1.1.1.1", {
+        headers: { "x-forwarded-for": ip },
+        signal: controller.signal,
+      });
+      return { controller, response: GET(request) };
+    };
+
+    const first = open("198.51.100.1");
+    const second = open("198.51.100.1");
+    expect((await first.response).status).toBe(200);
+    expect((await second.response).status).toBe(200);
+
+    const third = await open("198.51.100.1").response;
+    expect(third.status).toBe(429);
+    expect(await third.json()).toEqual({
+      error: "You already have 2 traces running. Stop one or wait for it to finish.",
+    });
+
+    const other = open("198.51.100.2");
+    expect((await other.response).status).toBe(200);
+
+    first.controller.abort();
+    second.controller.abort();
+    other.controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const again = open("198.51.100.1");
+    expect((await again.response).status).toBe(200);
+    again.controller.abort();
+  });
+});

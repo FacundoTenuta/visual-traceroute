@@ -61,7 +61,7 @@ describe("runTraceSession", () => {
     expect(events.at(-1)).toEqual({ type: "done", elapsedMs: 250, hops: 2, reached: true });
 
     expect(lastHop(events, 1).hop.addresses).toEqual([
-      { ip: "10.0.0.1", isPrivate: true, hostname: "host-10-0-0-1.example", geo: null, pending: false },
+      { ip: "10.0.0.1", isPrivate: true, hostname: null, geo: null, pending: false },
     ]);
     expect(lastHop(events, 2).hop.addresses).toEqual([
       { ip: "1.1.1.1", isPrivate: false, hostname: "host-1-1-1-1.example", geo: geoFor("1.1.1.1"), pending: false },
@@ -76,11 +76,18 @@ describe("runTraceSession", () => {
     expect(hopEvents[0].type === "hop" && hopEvents[0].hop.addresses[0].pending).toBe(true);
   });
 
-  it("never geolocates private addresses", async () => {
+  it("never geolocates or reverse-resolves private addresses", async () => {
     const d = deps({ source: source([" 1  192.168.1.1  1.0 ms"], [HEADER], 0) });
-    await collect("x", d);
+    const events = await collect("x", d);
     expect(d.geolocate).not.toHaveBeenCalledWith("192.168.1.1");
-    expect(d.reverseDns).toHaveBeenCalledWith("192.168.1.1");
+    expect(d.reverseDns).not.toHaveBeenCalledWith("192.168.1.1");
+    expect(lastHop(events, 1).hop.addresses[0]).toEqual({
+      ip: "192.168.1.1",
+      isPrivate: true,
+      hostname: null,
+      geo: null,
+      pending: false,
+    });
   });
 
   it("looks up every address only once", async () => {

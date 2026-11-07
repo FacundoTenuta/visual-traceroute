@@ -34,14 +34,24 @@ type DeckModules = {
   PathLayer: typeof import("@deck.gl/layers").PathLayer;
   ScatterplotLayer: typeof import("@deck.gl/layers").ScatterplotLayer;
 };
-let deckPromise: Promise<DeckModules> | null = null;
-/** deck.gl (3D arcs) is only fetched once the first segment exists, keeping first load light. */
-function loadDeck(): Promise<DeckModules> {
-  deckPromise ??= Promise.all([import("@deck.gl/mapbox"), import("@deck.gl/layers")]).then(([mapbox, layers]) => ({
-    MapboxOverlay: mapbox.MapboxOverlay,
-    PathLayer: layers.PathLayer,
-    ScatterplotLayer: layers.ScatterplotLayer,
-  }));
+let deckPromise: Promise<DeckModules | null> | null = null;
+/**
+ * deck.gl (3D arcs) is only fetched once the first segment exists, keeping
+ * first load light. A failed download resolves to null (the map keeps working
+ * with its flat lines) and is retried on the next call.
+ */
+function loadDeck(): Promise<DeckModules | null> {
+  deckPromise ??= Promise.all([import("@deck.gl/mapbox"), import("@deck.gl/layers")])
+    .then(([mapbox, layers]) => ({
+      MapboxOverlay: mapbox.MapboxOverlay,
+      PathLayer: layers.PathLayer,
+      ScatterplotLayer: layers.ScatterplotLayer,
+    }))
+    .catch((error) => {
+      console.error("[map] 3D arcs unavailable:", error);
+      deckPromise = null;
+      return null;
+    });
   return deckPromise;
 }
 
@@ -205,9 +215,12 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
       followPaused.current = false;
       framedWhole.current = false;
     }
+    // "failed" lets the loop go idle instead of waiting forever for deck.gl.
+    let deckState: "loading" | "ready" | "failed" = deckRef.current ? "ready" : "loading";
     if (arcs.length > 0 && !deckRef.current) {
       void loadDeck().then((modules) => {
         deckRef.current = modules;
+        deckState = modules ? "ready" : "failed";
       });
     }
 
@@ -380,14 +393,24 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
       }
 
       // Keep ticking while drawing, pulsing, or waiting for deck.gl to arrive.
-      const waitingForDeck = arcs.length > 0 && !(overlay && deck);
+      const waitingForDeck = arcs.length > 0 && deckState === "loading";
       const idle = !drawing && settled && (reduced || fullPath.length <= 1) && !waitingForDeck;
-      if (!idle) frame = requestAnimationFrame(render);
+      frame = idle ? 0 : requestAnimationFrame(render);
     };
 
+    // Once idle, zooming must still repaint the arcs (their opacity depends on zoom).
+    const repaint = () => {
+      if (!frame) frame = requestAnimationFrame(render);
+    };
+    const map = mapRef.current;
+    map?.on("zoom", repaint);
     frame = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(frame);
-  }, [route, finished]);
+    return () => {
+      cancelAnimationFrame(frame);
+      map?.off("zoom", repaint);
+    };
+    // `theme` restarts the loop so idle arcs repaint in the new palette.
+  }, [route, finished, theme]);
 
   return <div ref={containerRef} className="trace-map" role="region" aria-label="Route map" />;
 }

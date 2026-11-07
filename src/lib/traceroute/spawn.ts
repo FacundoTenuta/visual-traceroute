@@ -13,7 +13,7 @@ export function spawnTraceroute(target: string, signal: AbortSignal): LineSource
   const child = spawn(
     "traceroute",
     ["-n", "-q", "3", "-w", "2", "-m", String(MAX_HOPS), "--", target],
-    { stdio: ["ignore", "pipe", "pipe"], env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin" } },
+    { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, PATH: `/usr/sbin:/usr/bin:/sbin:/bin:${process.env.PATH ?? ""}` } },
   );
 
   const kill = () => child.kill("SIGTERM");

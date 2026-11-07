@@ -22,7 +22,7 @@ const response = (body: unknown, status = 200) =>
 
 describe("createIpApiClient", () => {
   it("maps ip-api fields into GeoInfo", async () => {
-    const fetchImpl = vi.fn(async () => response(okBody));
+    const fetchImpl = vi.fn<typeof fetch>(async () => response(okBody));
     const client = createIpApiClient(fetchImpl);
     expect(await client.geolocate("8.8.8.8")).toEqual({
       ip: "8.8.8.8",
@@ -42,7 +42,7 @@ describe("createIpApiClient", () => {
   });
 
   it("caches lookups per address", async () => {
-    const fetchImpl = vi.fn(async () => response(okBody));
+    const fetchImpl = vi.fn<typeof fetch>(async () => response(okBody));
     const client = createIpApiClient(fetchImpl);
     await client.geolocate("8.8.8.8");
     await client.geolocate("8.8.8.8");
@@ -57,14 +57,14 @@ describe("createIpApiClient", () => {
   });
 
   it("does not cache failures, so a later lookup can succeed", async () => {
-    const fetchImpl = vi.fn().mockResolvedValueOnce(response({}, 429)).mockResolvedValueOnce(response(okBody));
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(response({}, 429)).mockResolvedValueOnce(response(okBody));
     const client = createIpApiClient(fetchImpl);
     expect(await client.geolocate("8.8.8.8")).toBeNull();
     expect(await client.geolocate("8.8.8.8")).not.toBeNull();
   });
 
   it("resolves the server's own public location for the origin", async () => {
-    const fetchImpl = vi.fn(async () => response({ ...okBody, query: "203.0.113.7" }));
+    const fetchImpl = vi.fn<typeof fetch>(async () => response({ ...okBody, query: "203.0.113.7" }));
     const client = createIpApiClient(fetchImpl);
     expect((await client.origin())?.ip).toBe("203.0.113.7");
     expect(String(vi.mocked(fetchImpl).mock.calls[0][0])).toMatch(/^http:\/\/ip-api\.com\/json\/\?fields=/);

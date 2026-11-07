@@ -12,7 +12,7 @@ import { TraceSummary } from "./panel/trace-summary";
 import { useTheme } from "./use-theme";
 import { useTrace } from "./use-trace";
 
-const SUGGESTIONS = ["cloudflare.com", "github.com", "bbc.co.uk", "u-tokyo.ac.jp", "gov.br"];
+const SUGGESTIONS = ["cloudflare.com", "github.com", "bbc.co.uk", "www.u-tokyo.ac.jp", "gov.br"];
 const DESKTOP_PADDING = { top: 0, right: 404, bottom: 0, left: 0 };
 const MOBILE_PADDING = { top: 70, right: 0, bottom: 400, left: 0 };
 

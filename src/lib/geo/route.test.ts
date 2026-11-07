@@ -214,6 +214,48 @@ describe("revisited places", () => {
   });
 });
 
+describe("repeated segments", () => {
+  const madrid = geo("81.46.66.5", 40.4, -3.7, "Madrid");
+  const ny = geo("4.68.71.45", 40.7, -74, "New York");
+  const straightMid = greatCircle([-3.7, 40.4], [-74, 40.7], 128)[64];
+
+  /** Route bouncing Madrid ⇄ New York `trips` times. */
+  function bouncing(trips: number) {
+    const hops = Array.from({ length: trips + 1 }, (_, i) =>
+      i % 2 === 0 ? hop(i + 1, `10.0.0.${i}`, { ...madrid, ip: `10.0.0.${i}` }, 5) : hop(i + 1, `10.1.0.${i}`, { ...ny, ip: `10.1.0.${i}` }, 90),
+    );
+    return buildRoute(null, hops);
+  }
+  /** Signed sideways offset (lat degrees) of each segment's midpoint from the straight path. */
+  const offsets = (route: ReturnType<typeof buildRoute>) =>
+    route.segments.features.map((f) => {
+      const line = f.geometry.coordinates;
+      return line[Math.floor(line.length / 2)][1] - straightMid[1];
+    });
+
+  it("moves both segments of a round trip, one to each side, by the same amount", () => {
+    const [there, back] = offsets(bouncing(2));
+    expect(Math.sign(there)).toBe(-Math.sign(back));
+    expect(Math.abs(there)).toBeGreaterThan(1);
+    expect(Math.abs(there)).toBeCloseTo(Math.abs(back), 0);
+  });
+
+  it("keeps the middle one of three straight and spreads the others to both sides", () => {
+    const [first, middle, last] = offsets(bouncing(3));
+    expect(Math.abs(middle)).toBeLessThan(0.5);
+    expect(Math.sign(first)).toBe(-Math.sign(last));
+  });
+
+  it("caps the total fan width however many repeats there are", () => {
+    const few = offsets(bouncing(3));
+    const many = offsets(bouncing(12));
+    const spread = (values: number[]) => Math.max(...values) - Math.min(...values);
+    expect(spread(many)).toBeLessThanOrEqual(spread(few) * 1.6);
+    // Centred: as much to one side as to the other.
+    expect(Math.max(...many) + Math.min(...many)).toBeCloseTo(0, 0);
+  });
+});
+
 describe("bendTrack", () => {
   const track = greatCircle([-3.7, 40.4], [-74, 40.7], 32);
 

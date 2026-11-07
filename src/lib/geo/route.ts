@@ -193,9 +193,22 @@ export function bendTrack(track: LngLat[], ratio: number): LngLat[] {
   });
 }
 
-/** Sideways bend for the n-th repetition of a pair: 0, then +, −, ++, −− … */
-const REPEAT_BEND = 0.14;
-const repeatBend = (n: number) => (n === 0 ? 0 : (n % 2 === 1 ? 1 : -1) * Math.ceil(n / 2) * REPEAT_BEND);
+/** Gap between neighbouring segments of the same pair, as a fraction of their length. */
+const REPEAT_SPACING = 0.14;
+/** The whole fan of repeats never spreads wider than this (fraction of length). */
+const MAX_FAN_WIDTH = 0.36;
+
+/**
+ * Sideways bend for segment `index` of `count` between the same two places:
+ * spread symmetrically around the straight path (1 → straight, 2 → one each
+ * side, 3 → straight plus both sides), with the spacing shrinking so the fan
+ * stays within MAX_FAN_WIDTH.
+ */
+function fanBend(index: number, count: number): number {
+  if (count <= 1) return 0;
+  const spacing = Math.min(REPEAT_SPACING, MAX_FAN_WIDTH / (count - 1));
+  return (index - (count - 1) / 2) * spacing;
+}
 
 interface Visit {
   stop: RouteStop;
@@ -255,10 +268,18 @@ export function buildRoute(origin: GeoInfo | null, hops: EnrichedHop[]): RouteGe
     else visits.push({ stop, rtt });
   }
 
+  // Count every segment per pair of places first, so all of them can share the fan.
+  const pairOf = (a: RouteStop, b: RouteStop) => (a.id < b.id ? `${a.id}|${b.id}` : `${b.id}|${a.id}`);
+  const pairTotal = new Map<string, number>();
+  for (let i = 1; i < visits.length; i++) {
+    const pair = pairOf(visits[i - 1].stop, visits[i].stop);
+    pairTotal.set(pair, (pairTotal.get(pair) ?? 0) + 1);
+  }
+
   const coordinates: LngLat[] = [];
   const segments: RouteGeometry["segments"]["features"] = [];
   const arcs: Arc3D[] = [];
-  const pairCount = new Map<string, number>();
+  const pairSeen = new Map<string, number>();
   let distanceKm = 0;
   for (let i = 1; i < visits.length; i++) {
     const from = visits[i - 1].stop;
@@ -266,11 +287,15 @@ export function buildRoute(origin: GeoInfo | null, hops: EnrichedHop[]): RouteGe
     const start = coordinates.at(-1) ?? from.coord;
     const km = haversineKm(from.coord, to.coord);
     distanceKm += km;
-    const pair = [from.id, to.id].sort().join("|");
-    const n = pairCount.get(pair) ?? 0;
-    pairCount.set(pair, n + 1);
+    const pair = pairOf(from, to);
+    const n = pairSeen.get(pair) ?? 0;
+    pairSeen.set(pair, n + 1);
+    // Sides are measured along the pair's canonical direction, so a return trip
+    // (B→A) is placed on the same scale as the outbound one (A→B).
+    const reversed = from.id > to.id;
+    const bend = fanBend(n, pairTotal.get(pair)!) * (reversed ? -1 : 1);
     const steps = Math.min(128, Math.max(16, Math.ceil(km / 60)));
-    const track = bendTrack(greatCircle(start, to.coord, steps), repeatBend(n));
+    const track = bendTrack(greatCircle(start, to.coord, steps), bend);
     const properties: SegmentProps = {
       band: latencyBand(visits[i].rtt),
       key: `${from.id}>${to.id}#${n}`,

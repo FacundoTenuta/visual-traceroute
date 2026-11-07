@@ -1,5 +1,6 @@
 import type { ExpressionSpecification, StyleSpecification } from "maplibre-gl";
 import { LATENCY_STOPS, UNKNOWN_LATENCY } from "@/lib/latency-scale";
+import { PLACE_NAME_OVERRIDES } from "@/lib/place-names";
 
 export type ResolvedTheme = "light" | "dark";
 
@@ -70,7 +71,14 @@ const LIGHT: Palette = {
 
 export const PALETTES: Record<ResolvedTheme, Palette> = { dark: DARK, light: LIGHT };
 
-const NAME: ExpressionSpecification = ["coalesce", ["get", "name:latin"], ["get", "name"]];
+const SOURCE_NAME: ExpressionSpecification = ["coalesce", ["get", "name:latin"], ["get", "name"]];
+/** Label text, with PLACE_NAME_OVERRIDES applied (e.g. "Islas Malvinas"). */
+const NAME: ExpressionSpecification = [
+  "match",
+  ["coalesce", ["get", "name:en"], ["get", "name"]],
+  ...Object.entries(PLACE_NAME_OVERRIDES).flat(),
+  SOURCE_NAME,
+] as unknown as ExpressionSpecification;
 const FONT_REGULAR = ["Noto Sans Regular"];
 const FONT_BOLD = ["Noto Sans Bold"];
 

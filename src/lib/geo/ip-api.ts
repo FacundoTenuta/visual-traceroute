@@ -1,4 +1,5 @@
 import { TtlLru } from "@/lib/cache/lru";
+import { displayCountry } from "@/lib/place-names";
 import type { GeoInfo } from "@/lib/traceroute/types";
 
 const FIELDS = "status,message,query,country,countryCode,regionName,city,lat,lon,timezone,isp,org,as,asname";
@@ -50,7 +51,7 @@ function toGeo(body: IpApiResponse): GeoInfo | null {
     lon,
     city: text(body.city),
     region: text(body.regionName),
-    country: text(body.country),
+    country: displayCountry(text(body.country)),
     countryCode: countryCode && /^[A-Z]{2}$/.test(countryCode) ? countryCode : null,
     timezone: text(body.timezone),
     isp: text(body.isp),

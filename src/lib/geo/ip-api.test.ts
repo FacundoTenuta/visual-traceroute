@@ -145,6 +145,14 @@ describe("createIpApiClient", () => {
     expect(geo?.asName).toBeNull();
   });
 
+  it("reports the Malvinas as Islas Malvinas", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      response({ ...okBody, query: "80.73.208.1", country: "Falkland Islands", countryCode: "FK", city: "Stanley" }),
+    );
+    const { client } = setup(fetchImpl);
+    expect(await client.geolocate("80.73.208.1")).toMatchObject({ country: "Islas Malvinas", countryCode: "FK" });
+  });
+
   it("rejects out-of-range coordinates", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () => response({ ...okBody, lat: 123 }));
     const { client } = setup(fetchImpl);

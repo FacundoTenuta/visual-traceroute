@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EnrichedHop, GeoInfo } from "@/lib/traceroute/types";
-import { arcAltitudeM, buildRoute, greatCircle, haversineKm, latencyBand, liftTrack, sliceLine, zoomForSpan } from "./route";
+import { ARC_BASE_M, arcAltitudeM, buildRoute, greatCircle, haversineKm, latencyBand, liftTrack, sliceLine, zoomForSpan } from "./route";
 
 const geo = (ip: string, lat: number, lon: number, city = "X"): GeoInfo => ({
   ip,
@@ -128,20 +128,20 @@ describe("buildRoute", () => {
 describe("3D arcs", () => {
   it("is flat for hops inside one city and grows with distance", () => {
     expect(arcAltitudeM(5)).toBe(0);
-    expect(arcAltitudeM(500)).toBe(100_000);
+    expect(arcAltitudeM(500)).toBe(50_000);
     expect(arcAltitudeM(5000)).toBeGreaterThan(arcAltitudeM(500));
-    expect(arcAltitudeM(50_000)).toBe(1_000_000);
+    expect(arcAltitudeM(50_000)).toBe(450_000);
   });
 
   it("lifts a track so it leaves and lands on the ground, peaking mid-way", () => {
     const track = greatCircle([-3.7, 40.4], [-74, 40.7], 32);
     const path = liftTrack(track, 5770);
     expect(path).toHaveLength(track.length);
-    expect(path[0]).toEqual([...track[0], 0]);
-    expect(path.at(-1)![2]).toBeCloseTo(0);
+    expect(path[0]).toEqual([...track[0], ARC_BASE_M]);
+    expect(path.at(-1)![2]).toBeCloseTo(ARC_BASE_M);
     const mid = path[16];
     expect(mid[0]).toBe(track[16][0]);
-    expect(mid[2]).toBeCloseTo(arcAltitudeM(5770));
+    expect(mid[2]).toBeCloseTo(ARC_BASE_M + arcAltitudeM(5770));
     expect(path[8][2]).toBeLessThan(mid[2]);
   });
 
@@ -189,6 +189,13 @@ describe("sliceLine", () => {
   it("returns the start point at 0 and the whole line at 1", () => {
     expect(sliceLine(line, 0)).toEqual([[0, 0]]);
     expect(sliceLine(line, 1)).toEqual(line);
+  });
+
+  it("drops a tip that would sit on top of the previous vertex", () => {
+    expect(sliceLine(line, 0.5 + 1e-6)).toEqual([
+      [0, 0],
+      [10, 0],
+    ]);
   });
 
   it("interpolates extra coordinates such as altitude", () => {

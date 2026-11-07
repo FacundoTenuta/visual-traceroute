@@ -92,8 +92,10 @@ export function greatCircle(a: LngLat, b: LngLat, steps: number): LngLat[] {
 }
 
 const MIN_ARC_KM = 20;
-const MAX_ARC_ALTITUDE_M = 1_000_000;
-const ARC_HEIGHT_RATIO = 0.2;
+/** Small lift at both ends so a 3D arc never sits exactly on (and flickers with) the globe surface. */
+export const ARC_BASE_M = 2_000;
+const MAX_ARC_ALTITUDE_M = 450_000;
+const ARC_HEIGHT_RATIO = 0.1;
 
 /** Peak height of a jump arc: proportional to its length, flat for hops inside one city. */
 export function arcAltitudeM(km: number): number {
@@ -105,7 +107,8 @@ export function arcAltitudeM(km: number): number {
 export function liftTrack(track: LngLat[], km: number): Position3[] {
   const peak = arcAltitudeM(km);
   const last = track.length - 1;
-  return track.map(([lon, lat], i) => [lon, lat, last === 0 ? 0 : Math.sin(Math.PI * (i / last)) * peak]);
+  const base = peak > 0 ? ARC_BASE_M : 0;
+  return track.map(([lon, lat], i) => [lon, lat, base + (last === 0 ? 0 : Math.sin(Math.PI * (i / last)) * peak)]);
 }
 
 /** Camera zoom that keeps a segment of `km` comfortably in view on the globe. */
@@ -125,6 +128,9 @@ export function sliceLine<P extends number[]>(line: P[], fraction: number): P[] 
   for (let i = 0; i < lengths.length; i++) {
     if (remaining <= lengths[i]) {
       const k = lengths[i] === 0 ? 0 : remaining / lengths[i];
+      // A tip almost on top of the previous vertex makes a degenerate segment
+      // that renders as a spike; drop it.
+      if (k < 1e-3) return out;
       const a = line[i];
       const b = line[i + 1];
       out.push(a.map((v, j) => v + (b[j] - v) * k) as P);

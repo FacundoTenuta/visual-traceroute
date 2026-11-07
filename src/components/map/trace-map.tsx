@@ -62,12 +62,6 @@ const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2
 /** Slow, length-aware draw time so the line visibly grows hop by hop. */
 const drawDuration = (km: number) => Math.min(5000, Math.max(1600, 1500 + km * 0.3));
 
-/**
- * Camera tilt while following a segment, so altitude reads as height. Kept
- * low when zoomed far out, where a strong tilt pushes the globe off screen.
- */
-const followPitch = (zoom: number) => Math.min(50, Math.max(12, 12 + (zoom - 1.5) * 13));
-
 /** Arcs fade out as the globe flattens into a street map; the flat line takes over. */
 const arcOpacity = (zoom: number) => Math.max(0, Math.min(1, 1 - (zoom - 7) / 2));
 
@@ -188,12 +182,12 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
     mapRef.current?.setStyle(buildStyle(theme, dataRef.current, selectedHop), { diff: true });
   }, [theme, selectedHop]);
 
-  // Fly to a stop the user picked in the panel; deep enough to become a flat map.
+  // Fly to a stop the user picked in the panel, straight down, at city level.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !focus) return;
     followPaused.current = true;
-    map.flyTo({ center: focus.coord, zoom: Math.max(map.getZoom(), 9), speed: 1.2, essential: false });
+    map.flyTo({ center: focus.coord, zoom: Math.max(map.getZoom(), 9), pitch: 0, speed: 1.2, essential: false });
   }, [focus]);
 
   /**
@@ -263,13 +257,12 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
       const center = map.getCenter();
       const dLon = ((tip[0] - center.lng + 540) % 360) - 180;
       const zoom = map.getZoom();
-      const nextZoom = zoom + (zoomForSpan(km) - zoom) * 0.04;
       const pitch = map.getPitch();
       map.jumpTo({
         center: [center.lng + dLon * 0.07, center.lat + (tip[1] - center.lat) * 0.07],
-        zoom: nextZoom,
-        // Tilt the camera so the arcs visibly rise off the globe.
-        pitch: pitch + (followPitch(nextZoom) - pitch) * 0.05,
+        zoom: zoom + (zoomForSpan(km) - zoom) * 0.04,
+        // Automatic moves look straight down; tilting to see the 3D arcs is up to the user.
+        pitch: pitch * 0.9,
       });
     };
 
@@ -283,9 +276,9 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
         const x = route.stops.reduce((sum, stop) => sum + Math.cos(stop.coord[0] * toRad), 0);
         const y = route.stops.reduce((sum, stop) => sum + Math.sin(stop.coord[0] * toRad), 0);
         const lat = route.stops.reduce((sum, stop) => sum + stop.coord[1], 0) / route.stops.length;
-        map.easeTo({ center: [Math.atan2(y, x) / toRad, Math.max(-50, Math.min(50, lat))], zoom: 1.6, pitch: followPitch(1.6), duration: 2000 });
+        map.easeTo({ center: [Math.atan2(y, x) / toRad, Math.max(-50, Math.min(50, lat))], zoom: 1.6, pitch: 0, duration: 2000 });
       } else if (e - w > 0.5 || n - s > 0.5) {
-        map.fitBounds(route.bounds, { padding: { top: 120, right: 60, bottom: 60, left: 60 }, maxZoom: 5, pitch: 40, duration: 2000 });
+        map.fitBounds(route.bounds, { padding: { top: 120, right: 60, bottom: 60, left: 60 }, maxZoom: 5, pitch: 0, duration: 2000 });
       }
     };
 
@@ -315,19 +308,17 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
         settled = !drawing;
       }
 
-      // 3D arcs, glow and pulse (deck.gl).
+      // 3D arcs and pulse (deck.gl).
       const overlay = ensureOverlay();
       const deck = deckRef.current;
       if (overlay && deck && map) {
         const opacity = arcOpacity(map.getZoom());
         const drawn: DrawnArc[] = [];
-        const glow: DrawnArc[] = [];
         let tip: Position3 | null = null;
         arcs.forEach((arc, i) => {
           if (progress[i] <= 0) return;
           const path = sliceLine(arc.path, easeInOutCubic(progress[i]));
-          drawn.push(colorize(arc, path, currentTheme, 255));
-          glow.push(colorize(arc, path, currentTheme, currentTheme === "dark" ? 70 : 55));
+          if (path.length > 1) drawn.push(colorize(arc, path, currentTheme, 255));
           if (i === drawingIndex) tip = path.at(-1)!;
         });
 
@@ -342,28 +333,18 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
         overlay.setProps({
           layers: [
             new deck.PathLayer<DrawnArc>({
-              id: "arc-glow",
-              data: glow,
-              getPath: (d) => d.path,
-              getColor: (d) => d.colors,
-              getWidth: 9,
-              widthUnits: "pixels",
-              capRounded: true,
-              jointRounded: true,
-              billboard: true,
-              opacity,
-              updateTriggers: { getPath: time, getColor: time },
-            }),
-            new deck.PathLayer<DrawnArc>({
               id: "arc-line",
               data: drawn,
               getPath: (d) => d.path,
               getColor: (d) => d.colors,
-              getWidth: 2.5,
+              getWidth: 3,
               widthUnits: "pixels",
               capRounded: true,
               jointRounded: true,
               billboard: true,
+              // Test against the globe (arcs hide behind it) but don't write depth, so
+              // overlapping arcs blend in order instead of z-fighting into stripes.
+              parameters: { depthWriteEnabled: false },
               opacity,
               updateTriggers: { getPath: time, getColor: time },
             }),
@@ -375,8 +356,8 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
               radiusUnits: "pixels",
               getFillColor: currentTheme === "dark" ? [255, 255, 255, 255] : [23, 71, 181, 255],
               stroked: true,
-              getLineColor: currentTheme === "dark" ? [126, 232, 255, 110] : [23, 71, 181, 70],
-              getLineWidth: 6,
+              getLineColor: currentTheme === "dark" ? [6, 18, 43, 255] : [255, 255, 255, 255],
+              getLineWidth: 1.5,
               lineWidthUnits: "pixels",
               opacity,
               updateTriggers: { getPosition: time },

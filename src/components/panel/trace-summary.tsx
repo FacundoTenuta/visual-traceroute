@@ -8,6 +8,8 @@ interface TraceSummaryProps {
   state: TraceState;
   hops: EnrichedHop[];
   distanceKm: number;
+  /** Replays the route animation; shown once a trace has a drawn route and has ended. */
+  onReplay?: () => void;
 }
 
 const where = (geo: GeoInfo | null | undefined) =>
@@ -31,7 +33,7 @@ function statusText(state: TraceState, hops: EnrichedHop[]): string {
   }
 }
 
-export function TraceSummary({ state, hops, distanceKm }: TraceSummaryProps) {
+export function TraceSummary({ state, hops, distanceKm, onReplay }: TraceSummaryProps) {
   const lastAnswered = [...hops].reverse().find((h) => h.rtt);
   const countries = new Set(hops.flatMap((h) => h.addresses.map((a) => a.geo?.countryCode).filter(Boolean)));
   const destinationGeo = state.destination?.geo;
@@ -58,10 +60,21 @@ export function TraceSummary({ state, hops, distanceKm }: TraceSummaryProps) {
         </div>
       </div>
 
-      <p className="summary__status" data-status={state.status} role="status" aria-live="polite">
-        {state.status === "running" && <span className="spinner" aria-hidden="true" />}
-        {statusText(state, hops)}
-      </p>
+      <div className="summary__status-row">
+        <p className="summary__status" data-status={state.status} role="status" aria-live="polite">
+          {state.status === "running" && <span className="spinner" aria-hidden="true" />}
+          {statusText(state, hops)}
+        </p>
+        {onReplay && (
+          <button type="button" className="replay" onClick={onReplay}>
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9" />
+              <path d="M2.5 2.5v3h3" />
+            </svg>
+            Replay route
+          </button>
+        )}
+      </div>
 
       {hops.length > 0 && (
         <dl className="stats">

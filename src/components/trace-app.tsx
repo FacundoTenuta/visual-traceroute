@@ -37,11 +37,15 @@ export function TraceApp() {
   const theme = useTheme();
   const [selectedHop, setSelectedHop] = useState<number | null>(null);
   const [focus, setFocus] = useState<MapFocus | null>(null);
+  /** Bumped by "Replay route"; the map redraws the route from the start. */
+  const [replay, setReplay] = useState(0);
   const narrow = useIsNarrow();
 
   const hops = useMemo(() => selectHops(state), [state]);
   const route = useMemo(() => buildRoute(state.origin, hops), [state.origin, hops]);
   const running = state.status === "running";
+  const finished = state.status === "done" || state.status === "cancelled";
+  const canReplay = finished && route.segments.features.length > 0;
 
   const trace = useCallback(
     (target: string) => {
@@ -66,7 +70,8 @@ export function TraceApp() {
       <TraceMap
         theme={theme.resolved}
         route={route}
-        finished={state.status === "done" || state.status === "cancelled"}
+        finished={finished}
+        replay={replay}
         selectedHop={selectedHop}
         focus={focus}
         padding={narrow ? MOBILE_PADDING : DESKTOP_PADDING}
@@ -105,7 +110,12 @@ export function TraceApp() {
             </section>
           ) : (
             <>
-              <TraceSummary state={state} hops={hops} distanceKm={route.distanceKm} />
+              <TraceSummary
+                state={state}
+                hops={hops}
+                distanceKm={route.distanceKm}
+                onReplay={canReplay ? () => setReplay((n) => n + 1) : undefined}
+              />
               <HopList
                 hops={hops}
                 theme={theme.resolved}

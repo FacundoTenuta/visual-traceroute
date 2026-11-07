@@ -20,6 +20,8 @@ interface TraceMapProps {
   route: RouteGeometry;
   /** True once the trace has ended; the camera then frames the whole route. */
   finished: boolean;
+  /** Changes when the user asks to replay the route animation from the start. */
+  replay: number;
   selectedHop: number | null;
   focus: MapFocus | null;
   /** Extra padding (px) taken by floating UI, so the route is framed in the visible area. */
@@ -133,7 +135,7 @@ interface Pulse {
   color: Rgba;
 }
 
-export function TraceMap({ theme, route, finished, selectedHop, focus, padding, onSelectHop }: TraceMapProps) {
+export function TraceMap({ theme, route, finished, replay, selectedHop, focus, padding, onSelectHop }: TraceMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const overlayRef = useRef<MapboxOverlay | null>(null);
@@ -147,6 +149,7 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
   /** The user moved the map: stop driving the camera until the next trace. */
   const followPaused = useRef(false);
   const framedWhole = useRef(false);
+  const replayed = useRef(replay);
 
   useEffect(() => {
     latest.current = { theme, selectedHop, padding, onSelectHop, finished };
@@ -252,7 +255,11 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
     // The first place shows right away; every other one when a segment reaches it.
     const firstHopStop = arcs[0]?.from ?? hopStops[0]?.id;
 
-    if (arcs.length === 0 && hopStops.length <= 1) {
+    // A new trace, or "Replay route": forget what was drawn so every segment
+    // draws again in order and the camera follows from the start.
+    const replaying = replay !== replayed.current;
+    replayed.current = replay;
+    if (replaying || (arcs.length === 0 && hopStops.length <= 1)) {
       schedule.current.clear();
       queueEnd.current = 0;
       pulseClock.current = null;
@@ -469,7 +476,7 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
       map?.off("zoom", repaint);
     };
     // `theme` restarts the loop so idle arcs repaint in the new palette.
-  }, [route, finished, theme]);
+  }, [route, finished, theme, replay]);
 
   return <div ref={containerRef} className="trace-map" role="region" aria-label="Route map" />;
 }

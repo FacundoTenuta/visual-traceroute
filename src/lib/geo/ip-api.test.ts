@@ -125,6 +125,15 @@ describe("createIpApiClient", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(4);
   });
 
+  it("allows Pro volumes when an API key is configured", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) =>
+      response({ ...okBody, query: String(input).split("/json/")[1].split("?")[0] }),
+    );
+    const { client } = setup(fetchImpl, { apiKey: "k3y" });
+    for (let i = 1; i <= 60; i++) await client.geolocate(`1.0.0.${i}`);
+    expect(fetchImpl).toHaveBeenCalledTimes(60);
+  });
+
   it("sanitizes provider fields", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () =>
       response({ ...okBody, city: `  ${"x".repeat(500)}  `, countryCode: "<b>", asname: 42 }),

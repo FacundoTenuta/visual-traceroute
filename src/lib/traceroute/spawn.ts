@@ -17,7 +17,9 @@ export function spawnTraceroute(target: string, signal: AbortSignal): LineSource
   );
 
   const kill = () => child.kill("SIGTERM");
-  signal.addEventListener("abort", kill, { once: true });
+  // An abort that already happened never fires its event, so check it first.
+  if (signal.aborted) kill();
+  else signal.addEventListener("abort", kill, { once: true });
 
   const exit = new Promise<number | null>((resolve) => {
     child.on("error", () => resolve(127));

@@ -29,4 +29,12 @@ describe("TraceLimiter", () => {
     expect(limiter.acquire("b").ok).toBe(true);
     expect(limiter.acquire("c").ok).toBe(false);
   });
+
+  it("applies only the global cap to callers without a client id", () => {
+    const limiter = new TraceLimiter({ maxTotal: 3, maxPerClient: 1 });
+    expect(limiter.acquire(null).ok).toBe(true);
+    expect(limiter.acquire(null).ok).toBe(true);
+    expect(limiter.acquire(null).ok).toBe(true);
+    expect(limiter.acquire(null)).toEqual({ ok: false, error: "Too many traces running. Try again in a moment." });
+  });
 });

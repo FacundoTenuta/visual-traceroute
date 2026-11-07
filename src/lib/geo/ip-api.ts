@@ -66,7 +66,7 @@ export interface IpApiOptions {
   fetchImpl?: typeof fetch;
   now?: () => number;
   apiKey?: string;
-  /** Local budget, kept under ip-api's own limit of 45/minute. */
+  /** Local budget: 40/minute keeps the free tier under its 45/minute limit; Pro defaults to 1000. */
   maxPerMinute?: number;
   cacheSize?: number;
 }
@@ -75,7 +75,7 @@ export function createIpApiClient({
   fetchImpl = fetch,
   now = Date.now,
   apiKey,
-  maxPerMinute = 40,
+  maxPerMinute = apiKey ? 1000 : 40,
   cacheSize = 2000,
 }: IpApiOptions = {}) {
   const cache = new TtlLru<GeoInfo | null>({ maxEntries: cacheSize, now });

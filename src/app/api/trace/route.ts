@@ -1,22 +1,24 @@
 import { ipApi } from "@/lib/geo/ip-api";
 import { reverseDns } from "@/lib/geo/reverse-dns";
 import { runTraceSession } from "@/lib/traceroute/session";
-import { TraceLimiter } from "@/lib/traceroute/limiter";
+import { traceLimiter } from "@/lib/traceroute/limiter";
 import { spawnTraceroute } from "@/lib/traceroute/spawn";
 import { validateTarget } from "@/lib/traceroute/target";
 import type { TraceEvent } from "@/lib/traceroute/types";
 
-const limiter = new TraceLimiter({ maxTotal: 3, maxPerClient: 2 });
 /** Hard stop for a single trace (30 hops x 3 probes x 2 s is about 3 minutes worst case). */
 const TRACE_TIMEOUT_MS = 150_000;
 
 /**
- * Best-effort caller id. Forwarding headers are only trustworthy behind a
- * proxy that sets them; for direct local use every caller is "local".
+ * Caller id for the per-client cap. Forwarding headers can be forged by any
+ * direct caller, so they are read only when TRUST_PROXY=1 says a proxy in
+ * front overwrites them. Otherwise callers are anonymous and only the global
+ * cap applies (direct local use is a single user anyway).
  */
-function clientKey(request: Request): string {
+function clientKey(request: Request): string | null {
+  if (process.env.TRUST_PROXY !== "1") return null;
   const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return forwarded || request.headers.get("x-real-ip") || "local";
+  return forwarded || request.headers.get("x-real-ip")?.trim() || null;
 }
 
 const encoder = new TextEncoder();
@@ -26,7 +28,7 @@ export async function GET(request: Request) {
   const result = validateTarget(new URL(request.url).searchParams.get("target") ?? "");
   if (!result.ok) return Response.json({ error: result.error }, { status: 400 });
 
-  const slot = limiter.acquire(clientKey(request));
+  const slot = traceLimiter.acquire(clientKey(request));
   if (!slot.ok) return Response.json({ error: slot.error }, { status: 429 });
 
   // Aborting this controller kills traceroute; the session then finishes with

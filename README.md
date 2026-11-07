@@ -25,7 +25,8 @@ Traces start from the machine running the app, so run it locally. Serverless hos
 
 | Variable | Effect |
 | --- | --- |
-| `IPAPI_KEY` | Optional ip-api Pro key. When set, lookups use the HTTPS endpoint `pro.ip-api.com`; without it they use the free HTTP endpoint. |
+| `IPAPI_KEY` | Optional ip-api Pro key. When set, lookups use the HTTPS endpoint `pro.ip-api.com` with a local budget of 1,000 per minute; without it they use the free HTTP endpoint. |
+| `TRUST_PROXY` | Set to `1` only behind a proxy that overwrites `X-Forwarded-For`. Enables the per-client limit; otherwise forwarding headers are ignored because any caller could forge them. |
 
 ## Scripts
 
@@ -39,9 +40,9 @@ Traces start from the machine running the app, so run it locally. Serverless hos
 ## Limits
 
 - IPv4 targets and hostnames only for now.
-- ip-api's free tier allows 45 lookups per minute. The app keeps itself under 40, pauses when ip-api reports the quota is used up, and caches results in memory (up to 2,000 addresses for 24 hours; unknown addresses for 5 minutes). Hops beyond the budget show no location.
+- ip-api's free tier allows 45 lookups per minute. Without a key the app keeps itself under 40, pauses when ip-api reports the quota is used up, and caches results in memory (up to 2,000 addresses for 24 hours; unknown addresses for 5 minutes). Hops beyond the budget show no location.
 - Geolocation of backbone routers and anycast addresses (such as `1.1.1.1`) is approximate: it reflects where the address is registered, not always where the router is.
-- At most 3 traces run at the same time, and at most 2 per client (identified by `X-Forwarded-For` when a proxy sets it). A trace is stopped after 150 seconds.
+- At most 3 traces run at the same time. With `TRUST_PROXY=1`, each client (by `X-Forwarded-For`) may run at most 2 of them. A trace is stopped after 150 seconds and ends with the hops found so far.
 - Private hops (your own network) are shown by IP only: no reverse DNS or location, so internal hostnames are not exposed.
 - Numeric shorthand such as `0x7f.1` is rejected; use a full IPv4 address.
 

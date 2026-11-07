@@ -15,9 +15,15 @@ export class TraceLimiter {
     this.maxPerClient = maxPerClient;
   }
 
-  acquire(client: string): Slot {
-    const mine = this.perClient.get(client) ?? 0;
-    if (mine >= this.maxPerClient) {
+  /** Traces currently holding a slot. */
+  get active(): number {
+    return this.total;
+  }
+
+  /** `client` is null when the caller cannot be identified; only the global cap applies then. */
+  acquire(client: string | null): Slot {
+    const mine = client === null ? 0 : (this.perClient.get(client) ?? 0);
+    if (client !== null && mine >= this.maxPerClient) {
       return {
         ok: false,
         error: `You already have ${this.maxPerClient} traces running. Stop one or wait for it to finish.`,
@@ -28,7 +34,7 @@ export class TraceLimiter {
     }
 
     this.total++;
-    this.perClient.set(client, mine + 1);
+    if (client !== null) this.perClient.set(client, mine + 1);
     let released = false;
     return {
       ok: true,
@@ -36,6 +42,7 @@ export class TraceLimiter {
         if (released) return;
         released = true;
         this.total--;
+        if (client === null) return;
         const left = (this.perClient.get(client) ?? 1) - 1;
         if (left <= 0) this.perClient.delete(client);
         else this.perClient.set(client, left);
@@ -43,3 +50,6 @@ export class TraceLimiter {
     };
   }
 }
+
+/** Process-wide limits for /api/trace: 3 traces in total, 2 per identified client. */
+export const traceLimiter = new TraceLimiter({ maxTotal: 3, maxPerClient: 2 });

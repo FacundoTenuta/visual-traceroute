@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const spawnTraceroute = vi.fn();
 vi.mock("@/lib/traceroute/spawn", () => ({ spawnTraceroute }));
@@ -8,6 +8,7 @@ vi.mock("@/lib/geo/ip-api", () => ({
 vi.mock("@/lib/geo/reverse-dns", () => ({ reverseDns: vi.fn(async () => null) }));
 
 const { GET } = await import("./route");
+const { traceLimiter } = await import("@/lib/traceroute/limiter");
 
 function fakeSource(stdout: string[]) {
   async function* lines() {
@@ -51,46 +52,105 @@ describe("GET /api/trace", () => {
 });
 
 describe("GET /api/trace limits", () => {
-  function hangingSource(signal: AbortSignal) {
+  const untilAborted = (signal: AbortSignal) =>
+    new Promise<void>((resolve) => {
+      if (signal.aborted) resolve();
+      else signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+
+  function hangingSource(signal: AbortSignal, hops: string[] = []) {
     async function* lines() {
       yield { stream: "stderr" as const, line: "traceroute to 1.1.1.1 (1.1.1.1), 30 hops max, 40 byte packets" };
-      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      for (const line of hops) yield { stream: "stdout" as const, line };
+      await untilAborted(signal);
     }
-    return { lines: lines(), exit: new Promise<number | null>((resolve) => signal.addEventListener("abort", () => resolve(null), { once: true })) };
+    return { lines: lines(), exit: untilAborted(signal).then(() => null) };
   }
 
-  it("limits concurrent traces per client and frees the slot when the client leaves", async () => {
+  const open = (headers: Record<string, string> = {}) => {
+    const controller = new AbortController();
+    const request = new Request("http://localhost/api/trace?target=1.1.1.1", { headers, signal: controller.signal });
+    return { controller, response: GET(request) };
+  };
+
+  /** Waits until every trace has released its slot (no fixed sleeps). */
+  const waitForIdle = () => vi.waitFor(() => expect(traceLimiter.active).toBe(0));
+
+  beforeEach(() => {
+    expect(traceLimiter.active).toBe(0);
     spawnTraceroute.mockReset();
     spawnTraceroute.mockImplementation((_target: string, signal: AbortSignal) => hangingSource(signal));
-    const open = (ip: string) => {
-      const controller = new AbortController();
-      const request = new Request("http://localhost/api/trace?target=1.1.1.1", {
-        headers: { "x-forwarded-for": ip },
-        signal: controller.signal,
-      });
-      return { controller, response: GET(request) };
-    };
+  });
 
-    const first = open("198.51.100.1");
-    const second = open("198.51.100.1");
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  it("with TRUST_PROXY=1, limits concurrent traces per forwarded client", async () => {
+    vi.stubEnv("TRUST_PROXY", "1");
+    const a = { "x-forwarded-for": "198.51.100.1" };
+    const first = open(a);
+    const second = open(a);
     expect((await first.response).status).toBe(200);
     expect((await second.response).status).toBe(200);
 
-    const third = await open("198.51.100.1").response;
+    const third = await open(a).response;
     expect(third.status).toBe(429);
     expect(await third.json()).toEqual({
       error: "You already have 2 traces running. Stop one or wait for it to finish.",
     });
 
-    const other = open("198.51.100.2");
+    const other = open({ "x-forwarded-for": "198.51.100.2" });
     expect((await other.response).status).toBe(200);
 
     first.controller.abort();
     second.controller.abort();
     other.controller.abort();
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    const again = open("198.51.100.1");
+    await waitForIdle();
+    const again = open(a);
     expect((await again.response).status).toBe(200);
     again.controller.abort();
+    await waitForIdle();
+  });
+
+  it("without TRUST_PROXY, ignores forwarding headers and applies only the global cap", async () => {
+    const traces = [open({ "x-forwarded-for": "198.51.100.1" }), open({ "x-forwarded-for": "198.51.100.1" }), open()];
+    for (const trace of traces) expect((await trace.response).status).toBe(200);
+
+    const fourth = await open({ "x-forwarded-for": "203.0.113.9" }).response;
+    expect(fourth.status).toBe(429);
+    expect(await fourth.json()).toEqual({ error: "Too many traces running. Try again in a moment." });
+
+    traces.forEach((trace) => trace.controller.abort());
+    await waitForIdle();
+  });
+
+  it("stops a trace after 150 seconds, ends the stream with done and frees the slot", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    spawnTraceroute.mockImplementation((_target: string, signal: AbortSignal) =>
+      hangingSource(signal, [" 1  1.1.1.1  4.2 ms"]),
+    );
+
+    const traces = [open(), open(), open()];
+    const responses = await Promise.all(traces.map((t) => t.response));
+    expect(responses.map((r) => r.status)).toEqual([200, 200, 200]);
+    expect((await open().response).status).toBe(429);
+
+    const bodies = responses.map((r) => r.text());
+    await vi.advanceTimersByTimeAsync(149_999);
+    expect(spawnTraceroute.mock.calls.every(([, signal]) => !(signal as AbortSignal).aborted)).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+
+    for (const body of await Promise.all(bodies)) {
+      const last = JSON.parse(body.trim().split("\n\n").at(-1)!.replace(/^data: /, ""));
+      expect(last).toMatchObject({ type: "done", hops: 1 });
+    }
+    expect(traceLimiter.active).toBe(0);
+    const after = open();
+    expect((await after.response).status).toBe(200);
+    after.controller.abort();
+    vi.useRealTimers();
+    await waitForIdle();
   });
 });

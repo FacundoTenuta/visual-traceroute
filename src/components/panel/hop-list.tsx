@@ -1,12 +1,15 @@
 "use client";
 
 import { flag, formatLoss, formatMs } from "@/lib/format";
+import { groupHops } from "@/lib/client/hop-groups";
 import { latencyColor, type ScaleTheme } from "@/lib/latency-scale";
 import type { AddressInfo, EnrichedHop } from "@/lib/traceroute/types";
 
 interface HopListProps {
   hops: EnrichedHop[];
   theme: ScaleTheme;
+  /** The trace ran to its end (not stopped), so a final silent run can be summarised. */
+  finished: boolean;
   selectedHop: number | null;
   destinationIp: string | null;
   onSelect(hop: number): void;
@@ -36,18 +39,6 @@ function HopRow({ hop, theme, selected, isDestination, onSelect }: {
   const [primary, ...others] = hop.addresses;
   // Same continuous light-blue → red scale as the map.
   const color = { "--band": latencyColor(hop.rtt?.avg, theme) } as React.CSSProperties;
-
-  if (!primary) {
-    return (
-      <li className="hop hop--silent">
-        <span className="hop__number">{hop.hop}</span>
-        <div className="hop__body">
-          <span className="hop__silent">No reply</span>
-          <span className="hop__meta">The router did not answer these probes; the path continues past it.</span>
-        </div>
-      </li>
-    );
-  }
 
   return (
     <li id={`hop-${hop.hop}`} className="hop" data-selected={selected || undefined}>
@@ -90,19 +81,44 @@ function HopRow({ hop, theme, selected, isDestination, onSelect }: {
   );
 }
 
-export function HopList({ hops, theme, selectedHop, destinationIp, onSelect }: HopListProps) {
+const SILENT_HINT = "These routers did not answer the probes. That is common (they filter or rate-limit them) and the path continues past them.";
+
+function SilentRow({ from, to, trailing }: { from: number; to: number; trailing: boolean }) {
+  const range = from === to ? `Hop ${from}` : `Hops ${from}–${to}`;
+  return (
+    <li className="hop hop--silent" data-trailing={trailing || undefined} title={trailing ? undefined : SILENT_HINT}>
+      <span className="hop__number" aria-hidden="true" />
+      <div className="hop__body">
+        {trailing ? (
+          <>
+            <span className="hop__silent">{range} didn&apos;t answer</span>
+            <span className="hop__meta">The destination, or the routers just before it, filter traceroute probes.</span>
+          </>
+        ) : (
+          <span className="hop__silent">{range} · no reply</span>
+        )}
+      </div>
+    </li>
+  );
+}
+
+export function HopList({ hops, theme, finished, selectedHop, destinationIp, onSelect }: HopListProps) {
   return (
     <ol className="hops" aria-label="Hops">
-      {hops.map((hop) => (
-        <HopRow
-          key={hop.hop}
-          hop={hop}
-          theme={theme}
-          selected={hop.hop === selectedHop}
-          isDestination={Boolean(destinationIp && hop.ips.includes(destinationIp))}
-          onSelect={() => onSelect(hop.hop)}
-        />
-      ))}
+      {groupHops(hops, finished).map((item) =>
+        item.kind === "silent" ? (
+          <SilentRow key={`silent-${item.from}`} from={item.from} to={item.to} trailing={item.trailing} />
+        ) : (
+          <HopRow
+            key={item.hop.hop}
+            hop={item.hop}
+            theme={theme}
+            selected={item.hop.hop === selectedHop}
+            isDestination={Boolean(destinationIp && item.hop.ips.includes(destinationIp))}
+            onSelect={() => onSelect(item.hop.hop)}
+          />
+        ),
+      )}
     </ol>
   );
 }

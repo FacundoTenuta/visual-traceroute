@@ -119,6 +119,8 @@ export function TraceApp() {
               <HopList
                 hops={hops}
                 theme={theme.resolved}
+                // Only a trace that ran to its end can blame the destination for silence.
+                finished={state.status === "done"}
                 selectedHop={selectedHop}
                 destinationIp={state.resolvedIp}
                 onSelect={selectHop}

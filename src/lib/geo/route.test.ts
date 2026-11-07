@@ -214,6 +214,28 @@ describe("revisited places", () => {
   });
 });
 
+describe("repeated segments between nearby places", () => {
+  it("fans segments whose ends are near the same two places, whatever the order", () => {
+    const madrid = geo("81.46.66.5", 40.4, -3.7, "Madrid");
+    const alcobendas = geo("81.46.66.9", 40.54, -3.64, "Alcobendas");
+    const ny = geo("4.68.71.45", 40.7, -74, "New York");
+    const nj = geo("4.68.71.46", 40.73, -74.17, "Newark");
+    const route = buildRoute(null, [
+      hop(1, madrid.ip, madrid, 5),
+      hop(2, ny.ip, ny, 90),
+      hop(3, alcobendas.ip, alcobendas, 6),
+      hop(4, nj.ip, nj, 95),
+    ]);
+    const mids = route.segments.features.map((f) => f.geometry.coordinates[Math.floor(f.geometry.coordinates.length / 2)]);
+    expect(mids).toHaveLength(3);
+    for (let i = 0; i < mids.length; i++) {
+      for (let j = i + 1; j < mids.length; j++) {
+        expect(Math.hypot(mids[i][0] - mids[j][0], mids[i][1] - mids[j][1])).toBeGreaterThan(2);
+      }
+    }
+  });
+});
+
 describe("repeated segments", () => {
   const madrid = geo("81.46.66.5", 40.4, -3.7, "Madrid");
   const ny = geo("4.68.71.45", 40.7, -74, "New York");
@@ -258,6 +280,26 @@ describe("repeated segments", () => {
 
 describe("bendTrack", () => {
   const track = greatCircle([-3.7, 40.4], [-74, 40.7], 32);
+  const toVec = ([lon, lat]: number[]) => {
+    const r = Math.PI / 180;
+    return [Math.cos(lat * r) * Math.cos(lon * r), Math.cos(lat * r) * Math.sin(lon * r), Math.sin(lat * r)];
+  };
+  const angleDeg = (a: number[], b: number[]) => {
+    const [x, y] = [toVec(a), toVec(b)];
+    const dot = Math.min(1, Math.max(-1, x[0] * y[0] + x[1] * y[1] + x[2] * y[2]));
+    return (Math.acos(dot) * 180) / Math.PI;
+  };
+
+  it("keeps its shape over the poles: smooth steps and a bounded offset", () => {
+    // Europe to Japan over the North Pole.
+    const polar = greatCircle([2.17, 41.39], [139.7, 35.7], 64);
+    const bent = bendTrack(polar, 0.12);
+    const span = angleDeg(polar[0], polar.at(-1)!);
+    for (let i = 1; i < bent.length; i++) expect(angleDeg(bent[i - 1], bent[i])).toBeLessThan((span / 64) * 2);
+    const mid = angleDeg(bent[32], polar[32]);
+    expect(mid).toBeCloseTo(0.12 * span, 0);
+    for (let i = 0; i < bent.length; i++) expect(angleDeg(bent[i], polar[i])).toBeLessThanOrEqual(0.12 * span + 0.01);
+  });
 
   it("keeps the endpoints and leaves the track alone when the amount is zero", () => {
     expect(bendTrack(track, 0)).toEqual(track);

@@ -63,6 +63,14 @@ const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2
 /** Slow, length-aware draw time so the line visibly grows hop by hop. */
 const drawDuration = (km: number) => Math.min(5000, Math.max(1600, 1500 + km * 0.3));
 
+/** Lowest pin layer in the map style; deck.gl layers are inserted right below it. */
+const PINS_BOTTOM_LAYER = "origin";
+/**
+ * @deck.gl/mapbox reads `beforeId` from layer props in interleaved mode, but its
+ * `LayerOverlayProps` type is not exported, so it is passed through a spread.
+ */
+const UNDER_PINS = { beforeId: PINS_BOTTOM_LAYER };
+
 /** Arcs fade out as the globe flattens into a street map; the flat line takes over. */
 const arcOpacity = (zoom: number) => Math.max(0, Math.min(1, 1 - (zoom - 7) / 2));
 
@@ -400,10 +408,12 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
           layers: [
             new deck.PathLayer<DrawnArc>({
               id: "arc-line",
+              // Draw under every pin layer so hop numbers are never covered by lines.
+              ...UNDER_PINS,
               data: drawn,
               getPath: (d) => d.path,
               getColor: (d) => d.color,
-              getWidth: 3,
+              getWidth: 2,
               widthUnits: "pixels",
               capRounded: true,
               jointRounded: true,
@@ -416,14 +426,15 @@ export function TraceMap({ theme, route, finished, selectedHop, focus, padding, 
             }),
             new deck.ScatterplotLayer<Pulse>({
               id: "arc-pulse",
+              ...UNDER_PINS,
               data: pulse ? [pulse] : [],
               getPosition: (d) => d.position,
-              getRadius: 5,
+              getRadius: 4,
               radiusUnits: "pixels",
               getFillColor: (d) => d.color,
               stroked: true,
               getLineColor: currentTheme === "dark" ? [6, 18, 43, 255] : [255, 255, 255, 255],
-              getLineWidth: 1.5,
+              getLineWidth: 1,
               lineWidthUnits: "pixels",
               parameters: { depthWriteEnabled: false },
               opacity,

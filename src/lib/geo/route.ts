@@ -171,27 +171,43 @@ function primaryGeo(hop: EnrichedHop): GeoInfo | null {
 }
 
 /**
- * Bows a ground track sideways (perpendicular to its chord), peaking mid-way.
- * `ratio` is the peak offset as a fraction of the segment length; the sign
- * picks the side. Used to separate segments repeated between the same places.
+ * Bows a ground track sideways, peaking mid-way. Works on the sphere: every
+ * point is rotated along the normal of the segment's great circle, so the shape
+ * holds anywhere, including over the poles. `ratio` is the peak offset as a
+ * fraction of the segment's angular length; the sign picks the side (towards
+ * start × end for positive values).
  */
 export function bendTrack(track: LngLat[], ratio: number): LngLat[] {
   if (ratio === 0 || track.length < 3) return track.map((p) => [...p] as LngLat);
-  const first = track[0];
-  const last = track[track.length - 1];
-  const cos = Math.cos(rad((first[1] + last[1]) / 2)) || 1;
-  const dx = (last[0] - first[0]) * cos;
-  const dy = last[1] - first[1];
-  const length = Math.hypot(dx, dy) || 1;
-  const [nx, ny] = [-dy / length, dx / length];
+  const va = toVector(track[0]);
+  const vb = toVector(track[track.length - 1]);
+  const cross = [va[1] * vb[2] - va[2] * vb[1], va[2] * vb[0] - va[0] * vb[2], va[0] * vb[1] - va[1] * vb[0]];
+  const crossLength = Math.hypot(...cross);
+  if (crossLength < 1e-9) return track.map((p) => [...p] as LngLat);
+  const normal = cross.map((c) => c / crossLength);
+  const omega = Math.acos(Math.min(1, Math.max(-1, va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2])));
   const end = track.length - 1;
+
+  let prevLon = track[0][0];
   return track.map((point, i) => {
-    if (i === 0 || i === end) return [...point] as LngLat;
-    const offset = Math.sin(Math.PI * (i / end)) * ratio * length;
-    const lat = Math.max(-85, Math.min(85, point[1] + ny * offset));
-    return [point[0] + (nx * offset) / Math.max(Math.cos(rad(point[1])), 0.05), lat];
+    if (i === 0 || i === end) {
+      prevLon = point[0];
+      return [...point] as LngLat;
+    }
+    const delta = Math.sin(Math.PI * (i / end)) * ratio * omega;
+    const p = toVector(point);
+    const [x, y, z] = [0, 1, 2].map((k) => p[k] * Math.cos(delta) + normal[k] * Math.sin(delta));
+    let lon = deg(Math.atan2(y, x));
+    const lat = deg(Math.atan2(z, Math.hypot(x, y)));
+    while (lon - prevLon > 180) lon -= 360;
+    while (lon - prevLon < -180) lon += 360;
+    prevLon = lon;
+    return [lon, lat];
   });
 }
+
+/** Stops closer than this are treated as the same place when fanning repeats. */
+const SAME_PLACE_KM = 50;
 
 /** Gap between neighbouring segments of the same pair, as a fraction of their length. */
 const REPEAT_SPACING = 0.14;
@@ -268,8 +284,24 @@ export function buildRoute(origin: GeoInfo | null, hops: EnrichedHop[]): RouteGe
     else visits.push({ stop, rtt });
   }
 
+  // Stops close to each other count as one place when spreading repeats, so
+  // Madrid→NY and later Alcobendas→Newark share a fan instead of overlapping.
+  const places = new Map<string, string>();
+  const anchors: RouteStop[] = [];
+  for (const stop of stops) {
+    const near = anchors.find((anchor) => haversineKm(anchor.coord, stop.coord) <= SAME_PLACE_KM);
+    if (near) places.set(stop.id, near.id);
+    else {
+      anchors.push(stop);
+      places.set(stop.id, stop.id);
+    }
+  }
+  const placeOf = (stop: RouteStop) => places.get(stop.id)!;
   // Count every segment per pair of places first, so all of them can share the fan.
-  const pairOf = (a: RouteStop, b: RouteStop) => (a.id < b.id ? `${a.id}|${b.id}` : `${b.id}|${a.id}`);
+  const pairOf = (a: RouteStop, b: RouteStop) => {
+    const [pa, pb] = [placeOf(a), placeOf(b)];
+    return pa < pb ? `${pa}|${pb}` : `${pb}|${pa}`;
+  };
   const pairTotal = new Map<string, number>();
   for (let i = 1; i < visits.length; i++) {
     const pair = pairOf(visits[i - 1].stop, visits[i].stop);
@@ -292,8 +324,9 @@ export function buildRoute(origin: GeoInfo | null, hops: EnrichedHop[]): RouteGe
     pairSeen.set(pair, n + 1);
     // Sides are measured along the pair's canonical direction, so a return trip
     // (B→A) is placed on the same scale as the outbound one (A→B).
-    const reversed = from.id > to.id;
-    const bend = fanBend(n, pairTotal.get(pair)!) * (reversed ? -1 : 1);
+    const reversed = placeOf(from) > placeOf(to);
+    // Hops inside one place (a few km) stay straight.
+    const bend = placeOf(from) === placeOf(to) ? 0 : fanBend(n, pairTotal.get(pair)!) * (reversed ? -1 : 1);
     const steps = Math.min(128, Math.max(16, Math.ceil(km / 60)));
     const track = bendTrack(greatCircle(start, to.coord, steps), bend);
     const properties: SegmentProps = {

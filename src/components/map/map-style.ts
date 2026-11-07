@@ -1,5 +1,5 @@
 import type { ExpressionSpecification, StyleSpecification } from "maplibre-gl";
-import type { LatencyBand } from "@/lib/geo/route";
+import { LATENCY_STOPS, UNKNOWN_LATENCY } from "@/lib/latency-scale";
 
 export type ResolvedTheme = "light" | "dark";
 
@@ -22,7 +22,6 @@ interface Palette {
   fog: string;
   stopStroke: string;
   stopText: string;
-  bands: Record<LatencyBand, string>;
 }
 
 /** Deep-ocean cable chart. */
@@ -45,7 +44,6 @@ const DARK: Palette = {
   fog: "#0b1f45",
   stopStroke: "#06122b",
   stopText: "#06122b",
-  bands: { fast: "#7ee8ff", medium: "#4fa3ff", slow: "#8c7bff", critical: "#c86bff", unknown: "#6a86b5" },
 };
 
 /** Cyanotype print. */
@@ -68,7 +66,6 @@ const LIGHT: Palette = {
   fog: "#eaf2fb",
   stopStroke: "#ffffff",
   stopText: "#ffffff",
-  bands: { fast: "#0a9fc4", medium: "#1f63e0", slow: "#5b3fd6", critical: "#9a2fc7", unknown: "#8aa0c4" },
 };
 
 export const PALETTES: Record<ResolvedTheme, Palette> = { dark: DARK, light: LIGHT };
@@ -77,27 +74,20 @@ const NAME: ExpressionSpecification = ["coalesce", ["get", "name:latin"], ["get"
 const FONT_REGULAR = ["Noto Sans Regular"];
 const FONT_BOLD = ["Noto Sans Bold"];
 
-function bandColor(p: Palette): ExpressionSpecification {
+/** Continuous round-trip colour (light blue → red) from a feature's `rtt` property. */
+function rttColor(theme: ResolvedTheme): ExpressionSpecification {
+  const stops = LATENCY_STOPS[theme].flatMap(([ms, color]) => [ms, color]);
   return [
-    "match",
-    ["get", "band"],
-    "fast",
-    p.bands.fast,
-    "medium",
-    p.bands.medium,
-    "slow",
-    p.bands.slow,
-    "critical",
-    p.bands.critical,
-    p.bands.unknown,
+    "case",
+    ["==", ["typeof", ["get", "rtt"]], "number"],
+    ["interpolate", ["linear"], ["get", "rtt"], ...stops] as ExpressionSpecification,
+    UNKNOWN_LATENCY[theme],
   ];
 }
 
 export interface RouteData {
   segments: GeoJSON.FeatureCollection;
-  ground: GeoJSON.FeatureCollection;
   stops: GeoJSON.FeatureCollection;
-  pulse: GeoJSON.FeatureCollection;
 }
 
 export const EMPTY: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
@@ -113,8 +103,9 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
 
   return {
     version: 8,
-    // Globe at world scale, flat Web Mercator once the user zooms into a region.
-    projection: { type: ["interpolate", ["linear"], ["zoom"], 4.5, "vertical-perspective", 6.5, "mercator"] },
+    // Globe at world scale that flattens into Web Mercator at street level.
+    // deck.gl's overlay (3D arcs) only understands the built-in "globe" projection.
+    projection: { type: "globe" },
     sky: {
       "sky-color": p.sky,
       "horizon-color": p.horizon,
@@ -128,9 +119,7 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
     sources: {
       openmaptiles: { type: "vector", url: "https://tiles.openfreemap.org/planet" },
       segments: { type: "geojson", data: data.segments },
-      ground: { type: "geojson", data: data.ground },
       stops: { type: "geojson", data: data.stops },
-      pulse: { type: "geojson", data: data.pulse },
     },
     layers: [
       { id: "background", type: "background", paint: { "background-color": p.land } },
@@ -255,47 +244,28 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
         paint: { "text-color": p.labelCountry, "text-halo-color": p.halo, "text-halo-width": 1.2, "text-opacity": 0.85 },
       },
       {
-        // Shadow of each jump on the surface; it gives the lifted arc its height.
+        // Shadow of each 3D jump on the surface; it gives the arc its height.
         id: "route-ground",
-        type: "line",
-        source: "ground",
-        layout: { "line-cap": "round", "line-join": "round" },
-        paint: {
-          "line-color": bandColor(p),
-          "line-width": ["interpolate", ["linear"], ["zoom"], 1, 1, 10, 2],
-          "line-dasharray": [1.5, 2.5],
-          "line-opacity": theme === "dark" ? 0.35 : 0.45,
-        },
-      },
-      {
-        id: "route-glow",
         type: "line",
         source: "segments",
         layout: { "line-cap": "round", "line-join": "round" },
         paint: {
-          "line-color": bandColor(p),
-          "line-width": ["interpolate", ["linear"], ["zoom"], 1, 7, 10, 14],
-          "line-blur": 6,
-          "line-opacity": theme === "dark" ? 0.45 : 0.3,
+          "line-color": rttColor(theme),
+          "line-width": ["interpolate", ["linear"], ["zoom"], 1, 1, 10, 2],
+          "line-dasharray": [1.5, 2.5],
+          "line-opacity": ["interpolate", ["linear"], ["zoom"], 6, theme === "dark" ? 0.4 : 0.5, 8, 0],
         },
       },
       {
+        // Up close the arcs fade out (see trace-map) and the route lies flat on the map.
         id: "route-line",
         type: "line",
         source: "segments",
         layout: { "line-cap": "round", "line-join": "round" },
-        paint: { "line-color": bandColor(p), "line-width": ["interpolate", ["linear"], ["zoom"], 1, 2, 10, 4] },
-      },
-      {
-        id: "route-pulse",
-        type: "circle",
-        source: "pulse",
         paint: {
-          "circle-radius": 5,
-          "circle-color": theme === "dark" ? "#ffffff" : p.bands.medium,
-          "circle-blur": 0.4,
-          "circle-stroke-width": 6,
-          "circle-stroke-color": theme === "dark" ? "rgba(126, 232, 255, 0.35)" : "rgba(31, 99, 224, 0.25)",
+          "line-color": rttColor(theme),
+          "line-width": ["interpolate", ["linear"], ["zoom"], 6, 2, 14, 5],
+          "line-opacity": ["interpolate", ["linear"], ["zoom"], 6.5, 0, 8.5, 1],
         },
       },
       {
@@ -305,10 +275,10 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
         filter: isSelected,
         paint: {
           "circle-radius": 22,
-          "circle-color": bandColor(p),
+          "circle-color": rttColor(theme),
           "circle-opacity": 0.22,
           "circle-stroke-width": 1.5,
-          "circle-stroke-color": bandColor(p),
+          "circle-stroke-color": rttColor(theme),
         },
       },
       {
@@ -317,7 +287,7 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
         source: "stops",
         paint: {
           "circle-radius": ["case", ["==", ["get", "kind"], "origin"], 9, 11],
-          "circle-color": ["case", ["==", ["get", "kind"], "origin"], p.labelPlace, bandColor(p)],
+          "circle-color": ["case", ["==", ["get", "kind"], "origin"], p.labelPlace, rttColor(theme)],
           "circle-stroke-width": 2,
           "circle-stroke-color": p.stopStroke,
         },
@@ -334,7 +304,7 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
           "text-allow-overlap": true,
           "text-ignore-placement": true,
         },
-        paint: { "text-color": p.stopText },
+        paint: { "text-color": p.stopText, "text-halo-color": "rgba(0, 0, 0, 0.15)", "text-halo-width": 0.5 },
       },
     ],
   };

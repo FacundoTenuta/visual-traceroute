@@ -1,11 +1,12 @@
 "use client";
 
 import { flag, formatLoss, formatMs } from "@/lib/format";
-import { latencyBand } from "@/lib/geo/route";
+import { latencyColor, type ScaleTheme } from "@/lib/latency-scale";
 import type { AddressInfo, EnrichedHop } from "@/lib/traceroute/types";
 
 interface HopListProps {
   hops: EnrichedHop[];
+  theme: ScaleTheme;
   selectedHop: number | null;
   destinationIp: string | null;
   onSelect(hop: number): void;
@@ -25,14 +26,16 @@ function network(address: AddressInfo): string | null {
   return [geo.asn, name].filter(Boolean).join(" ") || null;
 }
 
-function HopRow({ hop, selected, isDestination, onSelect }: {
+function HopRow({ hop, theme, selected, isDestination, onSelect }: {
   hop: EnrichedHop;
+  theme: ScaleTheme;
   selected: boolean;
   isDestination: boolean;
   onSelect(): void;
 }) {
   const [primary, ...others] = hop.addresses;
-  const band = latencyBand(hop.rtt?.avg);
+  // Same continuous light-blue → red scale as the map.
+  const color = { "--band": latencyColor(hop.rtt?.avg, theme) } as React.CSSProperties;
 
   if (!primary) {
     return (
@@ -49,7 +52,7 @@ function HopRow({ hop, selected, isDestination, onSelect }: {
   return (
     <li id={`hop-${hop.hop}`} className="hop" data-selected={selected || undefined}>
       <button type="button" className="hop__button" onClick={onSelect} aria-pressed={selected}>
-        <span className="hop__number" data-band={band}>
+        <span className="hop__number" style={color}>
           {hop.hop}
         </span>
         <span className="hop__body">
@@ -71,7 +74,7 @@ function HopRow({ hop, selected, isDestination, onSelect }: {
           )}
         </span>
         <span className="hop__timing">
-          <span className="hop__rtt" data-band={band}>
+          <span className="hop__rtt" style={color}>
             {formatMs(hop.rtt?.avg)}
           </span>
           {hop.rtt && (
@@ -87,13 +90,14 @@ function HopRow({ hop, selected, isDestination, onSelect }: {
   );
 }
 
-export function HopList({ hops, selectedHop, destinationIp, onSelect }: HopListProps) {
+export function HopList({ hops, theme, selectedHop, destinationIp, onSelect }: HopListProps) {
   return (
     <ol className="hops" aria-label="Hops">
       {hops.map((hop) => (
         <HopRow
           key={hop.hop}
           hop={hop}
+          theme={theme}
           selected={hop.hop === selectedHop}
           isDestination={Boolean(destinationIp && hop.ips.includes(destinationIp))}
           onSelect={() => onSelect(hop.hop)}

@@ -25,6 +25,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+        {/* Open the tile server connection and fetch the tileset index while JS downloads. */}
+        <link rel="preconnect" href="https://tiles.openfreemap.org" crossOrigin="anonymous" />
+        <link rel="preload" href="https://tiles.openfreemap.org/planet" as="fetch" crossOrigin="anonymous" />
       </head>
       <body>{children}</body>
     </html>

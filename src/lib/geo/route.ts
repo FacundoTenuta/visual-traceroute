@@ -11,6 +11,8 @@ export interface RouteStop {
   label: string;
   coord: LngLat;
   band: LatencyBand;
+  /** Average RTT of the last hop grouped at this stop, if any. */
+  rtt: number | null;
   city: string | null;
   countryCode: string | null;
 }
@@ -19,15 +21,26 @@ export interface SegmentProps {
   band: LatencyBand;
   /** Stable id (`from>to`) so the map animates each segment only once. */
   key: string;
+  /** RTT at the start and end of the segment, for the colour gradient. */
+  fromRtt: number | null;
+  rtt: number | null;
+  km: number;
+}
+
+/** Longitude, latitude and altitude in metres. */
+export type Position3 = [number, number, number];
+
+export interface Arc3D extends SegmentProps {
+  path: Position3[];
 }
 
 export interface RouteGeometry {
   stops: RouteStop[];
   line: GeoJSON.Feature<GeoJSON.LineString>;
-  /** Lifted "jump" arcs, one per pair of consecutive stops. */
+  /** Great-circle ground tracks, one per pair of consecutive stops. */
   segments: GeoJSON.FeatureCollection<GeoJSON.LineString, SegmentProps>;
-  /** The same segments flat on the surface, drawn as a faint shadow. */
-  ground: GeoJSON.FeatureCollection<GeoJSON.LineString, SegmentProps>;
+  /** The same segments lifted into 3D "jump" arcs above the globe. */
+  arcs: Arc3D[];
   bounds: [LngLat, LngLat] | null;
   distanceKm: number;
 }
@@ -78,69 +91,43 @@ export function greatCircle(a: LngLat, b: LngLat, steps: number): LngLat[] {
   return points;
 }
 
-const planarLength = (a: LngLat, b: LngLat) => {
-  const cos = Math.cos(rad((a[1] + b[1]) / 2));
-  return Math.hypot((b[0] - a[0]) * cos, b[1] - a[1]);
-};
+const MIN_ARC_KM = 20;
+const MAX_ARC_ALTITUDE_M = 1_000_000;
+const ARC_HEIGHT_RATIO = 0.2;
 
-const MIN_LIFT_LENGTH_DEG = 0.5;
-const MAX_LIFT_DEG = 14;
-const LIFT_FACTOR = 0.16;
+/** Peak height of a jump arc: proportional to its length, flat for hops inside one city. */
+export function arcAltitudeM(km: number): number {
+  if (km < MIN_ARC_KM) return 0;
+  return Math.min(MAX_ARC_ALTITUDE_M, km * 1000 * ARC_HEIGHT_RATIO);
+}
 
-/**
- * Bows a ground track upward (poleward on screen) like a ballistic jump: the
- * endpoints stay put and the offset peaks mid-way, growing with the segment
- * length. Tiny hops inside one city stay flat.
- */
-export function liftedArc(ground: LngLat[]): LngLat[] {
-  if (ground.length < 3) return ground.map((p) => [...p] as LngLat);
-  const cumulative = [0];
-  for (let i = 1; i < ground.length; i++) cumulative.push(cumulative[i - 1] + planarLength(ground[i - 1], ground[i]));
-  const total = cumulative.at(-1)!;
-  if (total < MIN_LIFT_LENGTH_DEG) return ground.map((p) => [...p] as LngLat);
+/** Lifts a ground track into a 3D arc whose altitude peaks mid-way (sin curve). */
+export function liftTrack(track: LngLat[], km: number): Position3[] {
+  const peak = arcAltitudeM(km);
+  const last = track.length - 1;
+  return track.map(([lon, lat], i) => [lon, lat, last === 0 ? 0 : Math.sin(Math.PI * (i / last)) * peak]);
+}
 
-  const height = Math.min(MAX_LIFT_DEG, total * LIFT_FACTOR);
-  const first = ground[0];
-  const last = ground.at(-1)!;
-  // Chord normal decides the side once, so the whole arc bows the same way.
-  const chord: LngLat = [(last[0] - first[0]) * Math.cos(rad((first[1] + last[1]) / 2)), last[1] - first[1]];
-  let side: LngLat = [-chord[1], chord[0]];
-  if (side[1] < 0 || (Math.abs(side[1]) < 1e-9 && side[0] < 0)) side = [-side[0], -side[1]];
-
-  return ground.map((point, i) => {
-    if (i === 0 || i === ground.length - 1) return [...point] as LngLat;
-    const prev = ground[i - 1];
-    const next = ground[i + 1];
-    const cos = Math.cos(rad(point[1]));
-    let nx = -(next[1] - prev[1]);
-    let ny = (next[0] - prev[0]) * cos;
-    const len = Math.hypot(nx, ny) || 1;
-    nx /= len;
-    ny /= len;
-    if (nx * side[0] + ny * side[1] < 0) {
-      nx = -nx;
-      ny = -ny;
-    }
-    const offset = Math.sin(Math.PI * (cumulative[i] / total)) * height;
-    const lat = Math.max(-85, Math.min(85, point[1] + ny * offset));
-    return [point[0] + (nx * offset) / Math.max(cos, 0.05), lat];
-  });
+/** Camera zoom that keeps a segment of `km` comfortably in view on the globe. */
+export function zoomForSpan(km: number): number {
+  return Math.min(5.2, Math.max(1.5, 5.2 - Math.log2(Math.max(km, 1) / 250)));
 }
 
 /** The first `fraction` (0..1) of a line by length, ending on an interpolated tip. */
-export function sliceLine(line: LngLat[], fraction: number): LngLat[] {
+export function sliceLine<P extends number[]>(line: P[], fraction: number): P[] {
   if (line.length === 0) return [];
   if (fraction <= 0) return [line[0]];
-  if (fraction >= 1) return line.map((p) => [...p] as LngLat);
+  if (fraction >= 1) return line.map((p) => [...p] as P);
+  // Progress is measured on the ground (lon/lat); extra coordinates are interpolated too.
   const lengths = line.slice(1).map((p, i) => Math.hypot(p[0] - line[i][0], p[1] - line[i][1]));
   let remaining = lengths.reduce((a, b) => a + b, 0) * fraction;
-  const out: LngLat[] = [line[0]];
+  const out: P[] = [line[0]];
   for (let i = 0; i < lengths.length; i++) {
     if (remaining <= lengths[i]) {
       const k = lengths[i] === 0 ? 0 : remaining / lengths[i];
-      const [x1, y1] = line[i];
-      const [x2, y2] = line[i + 1];
-      out.push([x1 + (x2 - x1) * k, y1 + (y2 - y1) * k]);
+      const a = line[i];
+      const b = line[i + 1];
+      out.push(a.map((v, j) => v + (b[j] - v) * k) as P);
       return out;
     }
     remaining -= lengths[i];
@@ -176,6 +163,7 @@ export function buildRoute(origin: GeoInfo | null, hops: EnrichedHop[]): RouteGe
       label: "Origin",
       coord: [origin.lon, origin.lat],
       band: "unknown",
+      rtt: null,
       city: origin.city,
       countryCode: origin.countryCode,
     });
@@ -191,6 +179,7 @@ export function buildRoute(origin: GeoInfo | null, hops: EnrichedHop[]): RouteGe
       last.hops.push(hop.hop);
       last.label = hopLabel(last.hops);
       last.band = band;
+      last.rtt = hop.rtt?.avg ?? null;
       continue;
     }
     stops.push({
@@ -200,6 +189,7 @@ export function buildRoute(origin: GeoInfo | null, hops: EnrichedHop[]): RouteGe
       label: String(hop.hop),
       coord,
       band,
+      rtt: hop.rtt?.avg ?? null,
       city: geo.city,
       countryCode: geo.countryCode,
     });
@@ -207,18 +197,24 @@ export function buildRoute(origin: GeoInfo | null, hops: EnrichedHop[]): RouteGe
 
   const coordinates: LngLat[] = [];
   const segments: RouteGeometry["segments"]["features"] = [];
-  const ground: RouteGeometry["ground"]["features"] = [];
+  const arcs: Arc3D[] = [];
   let distanceKm = 0;
   for (let i = 1; i < stops.length; i++) {
     const from = coordinates.at(-1) ?? stops[i - 1].coord;
     const km = haversineKm(stops[i - 1].coord, stops[i].coord);
     distanceKm += km;
     const track = greatCircle(from, stops[i].coord, Math.min(128, Math.max(16, Math.ceil(km / 60))));
-    const arc = liftedArc(track);
-    const properties = { band: stops[i].band, key: `${stops[i - 1].id}>${stops[i].id}` };
-    segments.push({ type: "Feature", properties, geometry: { type: "LineString", coordinates: arc } });
-    ground.push({ type: "Feature", properties, geometry: { type: "LineString", coordinates: track } });
-    coordinates.push(...(coordinates.length ? arc.slice(1) : arc));
+    const properties: SegmentProps = {
+      band: stops[i].band,
+      key: `${stops[i - 1].id}>${stops[i].id}`,
+      // The origin has no RTT of its own; the line starts at the first hop's colour.
+      fromRtt: stops[i - 1].rtt ?? stops[i].rtt,
+      rtt: stops[i].rtt,
+      km,
+    };
+    segments.push({ type: "Feature", properties, geometry: { type: "LineString", coordinates: track } });
+    arcs.push({ ...properties, path: liftTrack(track, km) });
+    coordinates.push(...(coordinates.length ? track.slice(1) : track));
   }
 
   let bounds: RouteGeometry["bounds"] = null;
@@ -235,7 +231,7 @@ export function buildRoute(origin: GeoInfo | null, hops: EnrichedHop[]): RouteGe
     stops,
     line: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates } },
     segments: { type: "FeatureCollection", features: segments },
-    ground: { type: "FeatureCollection", features: ground },
+    arcs,
     bounds,
     distanceKm,
   };

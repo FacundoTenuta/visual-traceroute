@@ -1,22 +1,17 @@
-const BANDS = [
-  { band: "fast", label: "under 50 ms" },
-  { band: "medium", label: "50–150 ms" },
-  { band: "slow", label: "150–300 ms" },
-  { band: "critical", label: "over 300 ms" },
-];
+import { LATENCY_MAX_MS, LATENCY_STOPS, latencyGradientCss, type ScaleTheme } from "@/lib/latency-scale";
 
-export function LatencyLegend() {
+export function LatencyLegend({ theme }: { theme: ScaleTheme }) {
   return (
-    <div className="legend" aria-label="Average round-trip time">
+    <div className="legend" aria-label={`Average round-trip time, from 0 to ${LATENCY_MAX_MS} ms and more`}>
       <span className="legend__title">Round trip</span>
-      <ul>
-        {BANDS.map(({ band, label }) => (
-          <li key={band}>
-            <span className="legend__swatch" data-band={band} aria-hidden="true" />
-            {label}
-          </li>
+      <span className="legend__bar" style={{ background: latencyGradientCss(theme) }} aria-hidden="true" />
+      <span className="legend__ticks" aria-hidden="true">
+        {LATENCY_STOPS[theme].map(([ms], i, all) => (
+          <span key={ms} style={{ left: `${(ms / LATENCY_MAX_MS) * 100}%` }}>
+            {i === all.length - 1 ? `${ms}+` : ms} {i === 0 ? "ms" : ""}
+          </span>
         ))}
-      </ul>
+      </span>
     </div>
   );
 }

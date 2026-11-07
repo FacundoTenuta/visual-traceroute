@@ -1,7 +1,14 @@
 /* Cyanotype (light) is the base; the deep-ocean dark theme overrides it. */
 :root {
   color-scheme: light;
-  --space: radial-gradient(120% 90% at 40% 45%, #f4f8fd 0%, #dfeaf7 55%, #c9dbf0 100%);
+  --space-base: #dfeaf7;
+  /* Cyanotype paper: faint graticule over a soft light pool. Pure CSS, no assets. */
+  --space-image:
+    repeating-linear-gradient(0deg, rgba(23, 71, 181, 0.06) 0 1px, transparent 1px 56px),
+    repeating-linear-gradient(90deg, rgba(23, 71, 181, 0.06) 0 1px, transparent 1px 56px),
+    radial-gradient(55% 50% at 38% 46%, rgba(255, 255, 255, 0.95), transparent 70%),
+    radial-gradient(120% 90% at 40% 45%, #f4f8fd 0%, #dfeaf7 55%, #c2d6ee 100%);
+  --space-size: auto, auto, 100% 100%, 100% 100%;
   --surface: rgba(247, 250, 254, 0.86);
   --surface-strong: #ffffff;
   --surface-sunken: rgba(207, 224, 243, 0.55);
@@ -15,17 +22,25 @@
   --accent-soft: rgba(23, 71, 181, 0.1);
   --danger: #b4235a;
   --shadow: 0 1px 2px rgba(14, 35, 80, 0.06), 0 18px 48px -12px rgba(14, 35, 80, 0.28);
-  --band-fast: #0a9fc4;
-  --band-medium: #1f63e0;
-  --band-slow: #5b3fd6;
-  --band-critical: #9a2fc7;
   --band-unknown: #8aa0c4;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --space: radial-gradient(120% 90% at 40% 45%, #0c2552 0%, #071737 45%, #030a1c 100%);
+    --space-base: #030a1c;
+    /* Deep space: three tiled star layers plus two nebula glows. Pure CSS, no assets. */
+    --space-image:
+      radial-gradient(1.2px 1.2px at 23px 41px, rgba(255, 255, 255, 0.9) 50%, transparent 51%),
+      radial-gradient(1px 1px at 97px 133px, rgba(190, 220, 255, 0.75) 50%, transparent 51%),
+      radial-gradient(1.6px 1.6px at 151px 67px, rgba(255, 255, 255, 0.65) 50%, transparent 51%),
+      radial-gradient(1px 1px at 61px 211px, rgba(170, 200, 255, 0.6) 50%, transparent 51%),
+      radial-gradient(1.3px 1.3px at 233px 19px, rgba(255, 255, 255, 0.5) 50%, transparent 51%),
+      radial-gradient(1px 1px at 311px 287px, rgba(200, 225, 255, 0.45) 50%, transparent 51%),
+      radial-gradient(55% 45% at 16% 20%, rgba(56, 104, 214, 0.3), transparent 70%),
+      radial-gradient(45% 40% at 84% 82%, rgba(98, 64, 200, 0.24), transparent 70%),
+      radial-gradient(120% 90% at 40% 45%, #0c2552 0%, #071737 45%, #030a1c 100%);
+    --space-size: 180px 180px, 180px 180px, 180px 180px, 260px 260px, 260px 260px, 380px 380px, 100% 100%, 100% 100%, 100% 100%;
     --surface: rgba(8, 22, 52, 0.82);
     --surface-strong: #0c2150;
     --surface-sunken: rgba(22, 48, 94, 0.55);
@@ -39,17 +54,25 @@
     --accent-soft: rgba(92, 211, 255, 0.12);
     --danger: #ff7aa8;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 24px 60px -16px rgba(0, 0, 0, 0.7);
-    --band-fast: #7ee8ff;
-    --band-medium: #4fa3ff;
-    --band-slow: #8c7bff;
-    --band-critical: #c86bff;
     --band-unknown: #6a86b5;
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --space: radial-gradient(120% 90% at 40% 45%, #0c2552 0%, #071737 45%, #030a1c 100%);
+  --space-base: #030a1c;
+  /* Deep space: three tiled star layers plus two nebula glows. Pure CSS, no assets. */
+  --space-image:
+    radial-gradient(1.2px 1.2px at 23px 41px, rgba(255, 255, 255, 0.9) 50%, transparent 51%),
+    radial-gradient(1px 1px at 97px 133px, rgba(190, 220, 255, 0.75) 50%, transparent 51%),
+    radial-gradient(1.6px 1.6px at 151px 67px, rgba(255, 255, 255, 0.65) 50%, transparent 51%),
+    radial-gradient(1px 1px at 61px 211px, rgba(170, 200, 255, 0.6) 50%, transparent 51%),
+    radial-gradient(1.3px 1.3px at 233px 19px, rgba(255, 255, 255, 0.5) 50%, transparent 51%),
+    radial-gradient(1px 1px at 311px 287px, rgba(200, 225, 255, 0.45) 50%, transparent 51%),
+    radial-gradient(55% 45% at 16% 20%, rgba(56, 104, 214, 0.3), transparent 70%),
+    radial-gradient(45% 40% at 84% 82%, rgba(98, 64, 200, 0.24), transparent 70%),
+    radial-gradient(120% 90% at 40% 45%, #0c2552 0%, #071737 45%, #030a1c 100%);
+  --space-size: 180px 180px, 180px 180px, 180px 180px, 260px 260px, 260px 260px, 380px 380px, 100% 100%, 100% 100%, 100% 100%;
   --surface: rgba(8, 22, 52, 0.82);
   --surface-strong: #0c2150;
   --surface-sunken: rgba(22, 48, 94, 0.55);
@@ -63,10 +86,6 @@
   --accent-soft: rgba(92, 211, 255, 0.12);
   --danger: #ff7aa8;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 24px 60px -16px rgba(0, 0, 0, 0.7);
-  --band-fast: #7ee8ff;
-  --band-medium: #4fa3ff;
-  --band-slow: #8c7bff;
-  --band-critical: #c86bff;
   --band-unknown: #6a86b5;
 }
 
@@ -82,8 +101,7 @@ body {
 }
 
 body {
-  background: #071737;
-  background: var(--space);
+  background-color: var(--space-base);
   color: var(--text);
   font-family: var(--font-sans), system-ui, sans-serif;
   font-size: 15px;
@@ -115,24 +133,23 @@ input {
   font-family: var(--font-mono), ui-monospace, monospace;
 }
 
-[data-band="fast"] { --band: var(--band-fast); }
-[data-band="medium"] { --band: var(--band-medium); }
-[data-band="slow"] { --band: var(--band-slow); }
-[data-band="critical"] { --band: var(--band-critical); }
-[data-band="unknown"] { --band: var(--band-unknown); }
 
 /* Layout */
 
 .app {
   position: fixed;
   inset: 0;
+  background-color: var(--space-base);
+  background-image: var(--space-image);
+  background-size: var(--space-size);
 }
 
 /* Scoped under .app so it wins over maplibre's own `.maplibregl-map { position: relative }`. */
 .app .trace-map {
   position: absolute;
   inset: 0;
-  background: var(--space);
+  /* Transparent: the space background on .app shows around the globe. */
+  background: transparent;
 }
 
 .panel {
@@ -619,26 +636,33 @@ input {
   font-weight: 600;
 }
 
-.legend ul {
-  display: flex;
-  gap: 12px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
+.legend__bar {
+  display: block;
+  width: 220px;
+  height: 6px;
+  border-radius: 3px;
 }
 
-.legend li {
-  display: flex;
-  align-items: center;
-  gap: 5px;
+.legend__ticks {
+  position: relative;
+  display: block;
+  height: 14px;
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+.legend__ticks span {
+  position: absolute;
+  transform: translateX(-50%);
   white-space: nowrap;
 }
 
-.legend__swatch {
-  width: 14px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--band);
+.legend__ticks span:first-child {
+  transform: none;
+}
+
+.legend__ticks span:last-child {
+  transform: translateX(-100%);
 }
 
 /* MapLibre controls in the theme */
@@ -696,9 +720,8 @@ input {
     bottom: auto;
   }
 
-  .legend ul {
-    flex-wrap: wrap;
-    gap: 4px 12px;
+  .legend__bar {
+    width: 100%;
   }
 
   .maplibregl-ctrl-bottom-left {

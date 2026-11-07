@@ -66,6 +66,7 @@ export function TraceApp() {
       <TraceMap
         theme={theme.resolved}
         route={route}
+        finished={state.status === "done" || state.status === "cancelled"}
         selectedHop={selectedHop}
         focus={focus}
         padding={narrow ? MOBILE_PADDING : DESKTOP_PADDING}
@@ -107,6 +108,7 @@ export function TraceApp() {
               <TraceSummary state={state} hops={hops} distanceKm={route.distanceKm} />
               <HopList
                 hops={hops}
+                theme={theme.resolved}
                 selectedHop={selectedHop}
                 destinationIp={state.resolvedIp}
                 onSelect={selectHop}
@@ -116,7 +118,7 @@ export function TraceApp() {
         </div>
       </aside>
 
-      <LatencyLegend />
+      <LatencyLegend theme={theme.resolved} />
     </main>
   );
 }

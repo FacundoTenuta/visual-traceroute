@@ -1,9 +1,11 @@
 "use client";
 
 import "maplibre-gl/dist/maplibre-gl.css";
+import type { MapboxOverlay } from "@deck.gl/mapbox";
 import type { GeoJSONSource, Map as MapLibreMap } from "maplibre-gl";
 import { useEffect, useRef } from "react";
-import { sliceLine, type LngLat, type RouteGeometry } from "@/lib/geo/route";
+import { sliceLine, zoomForSpan, type Arc3D, type LngLat, type Position3, type RouteGeometry } from "@/lib/geo/route";
+import { latencyRgba } from "@/lib/latency-scale";
 import { buildStyle, EMPTY, type ResolvedTheme, type RouteData } from "./map-style";
 
 export interface MapFocus {
@@ -15,6 +17,8 @@ export interface MapFocus {
 interface TraceMapProps {
   theme: ResolvedTheme;
   route: RouteGeometry;
+  /** True once the trace has ended; the camera then frames the whole route. */
+  finished: boolean;
   selectedHop: number | null;
   focus: MapFocus | null;
   /** Extra padding (px) taken by floating UI, so the route is framed in the visible area. */
@@ -22,19 +26,46 @@ interface TraceMapProps {
   onSelectHop(hop: number): void;
 }
 
+// Start downloading maplibre as soon as this module loads, in parallel with hydration.
+const maplibrePromise = typeof window === "undefined" ? null : import("maplibre-gl");
+
+type DeckModules = {
+  MapboxOverlay: typeof import("@deck.gl/mapbox").MapboxOverlay;
+  PathLayer: typeof import("@deck.gl/layers").PathLayer;
+  ScatterplotLayer: typeof import("@deck.gl/layers").ScatterplotLayer;
+};
+let deckPromise: Promise<DeckModules> | null = null;
+/** deck.gl (3D arcs) is only fetched once the first segment exists, keeping first load light. */
+function loadDeck(): Promise<DeckModules> {
+  deckPromise ??= Promise.all([import("@deck.gl/mapbox"), import("@deck.gl/layers")]).then(([mapbox, layers]) => ({
+    MapboxOverlay: mapbox.MapboxOverlay,
+    PathLayer: layers.PathLayer,
+    ScatterplotLayer: layers.ScatterplotLayer,
+  }));
+  return deckPromise;
+}
+
 type Feature = GeoJSON.Feature;
 const collection = (features: Feature[]): GeoJSON.FeatureCollection => ({ type: "FeatureCollection", features });
-const point = (coordinates: LngLat): Feature => ({ type: "Feature", properties: {}, geometry: { type: "Point", coordinates } });
-
 const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
 
-/** Draw time for one segment, longer for longer jumps. */
-function drawDuration(coords: LngLat[]): number {
-  let length = 0;
-  for (let i = 1; i < coords.length; i++) {
-    length += Math.hypot(coords[i][0] - coords[i - 1][0], coords[i][1] - coords[i - 1][1]);
-  }
-  return Math.min(1800, Math.max(650, 450 + length * 18));
+/** Slow, length-aware draw time so the line visibly grows hop by hop. */
+const drawDuration = (km: number) => Math.min(5000, Math.max(1600, 1500 + km * 0.3));
+
+/**
+ * Camera tilt while following a segment, so altitude reads as height. Kept
+ * low when zoomed far out, where a strong tilt pushes the globe off screen.
+ */
+const followPitch = (zoom: number) => Math.min(50, Math.max(12, 12 + (zoom - 1.5) * 13));
+
+/** Arcs fade out as the globe flattens into a street map; the flat line takes over. */
+const arcOpacity = (zoom: number) => Math.max(0, Math.min(1, 1 - (zoom - 7) / 2));
+
+/** First guess of where the viewer is, from the time zone offset: instant and offline. */
+function initialCenter(): LngLat {
+  if (typeof window === "undefined") return [10, 30];
+  const lon = -new Date().getTimezoneOffset() / 4;
+  return [Math.max(-170, Math.min(170, lon)), 28];
 }
 
 function stopFeatures(route: RouteGeometry): Feature[] {
@@ -44,7 +75,7 @@ function stopFeatures(route: RouteGeometry): Feature[] {
       id: stop.id,
       kind: stop.kind,
       label: stop.label,
-      band: stop.band,
+      rtt: stop.rtt,
       firstHop: stop.hops[0] ?? null,
       hopsKey: `,${stop.hops.join(",")},`,
     },
@@ -56,20 +87,42 @@ function prefersReducedMotion() {
   return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-export function TraceMap({ theme, route, selectedHop, focus, padding, onSelectHop }: TraceMapProps) {
+interface DrawnArc {
+  key: string;
+  path: Position3[];
+  colors: [number, number, number, number][];
+}
+
+/** Per-vertex colours so each arc fades from its start RTT colour to its end RTT colour. */
+function colorize(arc: Arc3D, path: Position3[], theme: ResolvedTheme, alpha: number): DrawnArc {
+  const total = arc.path.length - 1 || 1;
+  const colors = path.map((_, i) => {
+    const t = Math.min(1, i / total);
+    const from = arc.fromRtt;
+    const to = arc.rtt;
+    const rtt = from === null || to === null ? (to ?? from) : from + (to - from) * t;
+    return latencyRgba(rtt, theme, alpha);
+  });
+  return { key: arc.key, path, colors };
+}
+
+export function TraceMap({ theme, route, finished, selectedHop, focus, padding, onSelectHop }: TraceMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
-  const dataRef = useRef<RouteData>({ segments: EMPTY, ground: EMPTY, stops: EMPTY, pulse: EMPTY });
-  const latest = useRef({ theme, selectedHop, padding, onSelectHop });
-  const framedStops = useRef(0);
+  const overlayRef = useRef<MapboxOverlay | null>(null);
+  const deckRef = useRef<DeckModules | null>(null);
+  const dataRef = useRef<RouteData>({ segments: EMPTY, stops: EMPTY });
+  const latest = useRef({ theme, selectedHop, padding, onSelectHop, finished });
   /** When each segment (by key) starts drawing, and how long it takes. */
   const schedule = useRef(new Map<string, { start: number; duration: number }>());
   const queueEnd = useRef(0);
-  /** Pulse clock survives route updates so the pulse does not restart on every hop. */
   const pulseClock = useRef<number | null>(null);
+  /** The user moved the map: stop driving the camera until the next trace. */
+  const followPaused = useRef(false);
+  const framedWhole = useRef(false);
 
   useEffect(() => {
-    latest.current = { theme, selectedHop, padding, onSelectHop };
+    latest.current = { theme, selectedHop, padding, onSelectHop, finished };
   });
 
   // Create the map once; maplibre is loaded lazily because it needs `window`.
@@ -77,22 +130,27 @@ export function TraceMap({ theme, route, selectedHop, focus, padding, onSelectHo
     let cancelled = false;
     let map: MapLibreMap | null = null;
 
-    import("maplibre-gl").then(({ default: maplibregl }) => {
+    maplibrePromise?.then(({ default: maplibregl }) => {
       if (cancelled || !containerRef.current) return;
       const { theme: initialTheme, selectedHop: initialHop } = latest.current;
       map = new maplibregl.Map({
         container: containerRef.current,
         style: buildStyle(initialTheme, dataRef.current, initialHop),
-        center: [-20, 25],
-        zoom: 1.4,
-        minZoom: 0.8,
+        center: initialCenter(),
+        zoom: 2.3,
+        minZoom: 1,
         maxPitch: 60,
+        fadeDuration: 150,
         attributionControl: { compact: true },
       });
       // Keep the camera centred in the area not covered by the floating panel.
       map.setPadding(latest.current.padding);
       map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-left");
       map.on("error", (event) => console.error("[map]", event.error?.message ?? event));
+      // Any gesture from the user takes over the camera.
+      map.on("movestart", (event) => {
+        if ((event as { originalEvent?: Event }).originalEvent) followPaused.current = true;
+      });
 
       map.on("click", "stops", (e) => {
         const hop = e.features?.[0]?.properties?.firstHop;
@@ -105,6 +163,7 @@ export function TraceMap({ theme, route, selectedHop, focus, padding, onSelectHo
 
     return () => {
       cancelled = true;
+      overlayRef.current = null;
       map?.remove();
       mapRef.current = null;
     };
@@ -119,132 +178,216 @@ export function TraceMap({ theme, route, selectedHop, focus, padding, onSelectHo
     mapRef.current?.setStyle(buildStyle(theme, dataRef.current, selectedHop), { diff: true });
   }, [theme, selectedHop]);
 
-  // Frame the route while it grows.
-  useEffect(() => {
-    const map = mapRef.current;
-    if (route.stops.length === 0) {
-      framedStops.current = 0;
-      return;
-    }
-    if (!map || !route.bounds || route.stops.length === framedStops.current) return;
-    framedStops.current = route.stops.length;
-    const [[w, s], [e, n]] = route.bounds;
-    // Map padding (the panel) is already applied; this is extra breathing room,
-    // with more on top so lifted arcs are not clipped.
-    const framePadding = { top: 110, right: 60, bottom: 60, left: 60 };
-    if (e - w > 90 || n - s > 60) {
-      // Intercontinental routes: show the whole globe centred on the route.
-      const toRad = Math.PI / 180;
-      const x = route.stops.reduce((sum, stop) => sum + Math.cos(stop.coord[0] * toRad), 0);
-      const y = route.stops.reduce((sum, stop) => sum + Math.sin(stop.coord[0] * toRad), 0);
-      const lat = route.stops.reduce((sum, stop) => sum + stop.coord[1], 0) / route.stops.length;
-      map.easeTo({ center: [Math.atan2(y, x) / toRad, Math.max(-50, Math.min(50, lat))], zoom: 1.35, duration: 1600 });
-    } else if (route.stops.length === 1 || (e - w < 0.5 && n - s < 0.5)) {
-      map.easeTo({ center: route.stops[0].coord, zoom: Math.max(map.getZoom(), 2.2), duration: 1200 });
-    } else {
-      map.fitBounds(route.bounds, { padding: framePadding, maxZoom: 4.2, duration: 1400 });
-    }
-  }, [route]);
-
   // Fly to a stop the user picked in the panel; deep enough to become a flat map.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !focus) return;
+    followPaused.current = true;
     map.flyTo({ center: focus.coord, zoom: Math.max(map.getZoom(), 9), speed: 1.2, essential: false });
   }, [focus]);
 
   /**
-   * One animation loop for the route: every new segment draws itself from the
-   * previous hop toward the next (queued, so they follow the packet's
-   * direction), each stop appears when its segment arrives, and once the
-   * route is complete a pulse keeps travelling along it.
+   * One animation loop for the route. Every new segment draws itself slowly
+   * from the previous hop toward the next as a 3D arc (queued, so they follow
+   * the packet's direction) while the camera follows the tip; each stop shows
+   * when its segment arrives; afterwards a pulse keeps travelling the route.
    */
   useEffect(() => {
     const reduced = prefersReducedMotion();
+    const arcs = route.arcs;
     const segments = route.segments.features;
-    const grounds = route.ground.features;
     const stops = stopFeatures(route);
 
-    if (segments.length === 0 && stops.length <= 1) {
+    if (arcs.length === 0 && stops.length <= 1) {
       schedule.current.clear();
       queueEnd.current = 0;
       pulseClock.current = null;
+      followPaused.current = false;
+      framedWhole.current = false;
+    }
+    if (arcs.length > 0 && !deckRef.current) {
+      void loadDeck().then((modules) => {
+        deckRef.current = modules;
+      });
     }
 
     const now = performance.now();
-    const live = new Set(segments.map((f) => f.properties.key));
+    const live = new Set(arcs.map((a) => a.key));
     for (const key of schedule.current.keys()) if (!live.has(key)) schedule.current.delete(key);
-    for (const feature of segments) {
-      const key = feature.properties.key;
-      if (schedule.current.has(key)) continue;
-      const duration = reduced ? 0 : drawDuration(feature.geometry.coordinates as LngLat[]);
+    for (const arc of arcs) {
+      if (schedule.current.has(arc.key)) continue;
+      const duration = reduced ? 0 : drawDuration(arc.km);
       const start = Math.max(now, queueEnd.current);
-      schedule.current.set(key, { start, duration });
+      schedule.current.set(arc.key, { start, duration });
       queueEnd.current = start + duration;
+      framedWhole.current = false;
     }
 
-    const push = (data: Partial<RouteData>) => {
-      dataRef.current = { ...dataRef.current, ...data };
+    const fullPath: Position3[] = arcs.flatMap((arc, i) => (i === 0 ? arc.path : arc.path.slice(1)));
+
+    const pushMapData = (data: RouteData) => {
+      dataRef.current = data;
       const map = mapRef.current;
       if (!map) return;
-      for (const [id, value] of Object.entries(data)) {
-        (map.getSource(id) as GeoJSONSource | undefined)?.setData(value);
+      (map.getSource("segments") as GeoJSONSource | undefined)?.setData(data.segments);
+      (map.getSource("stops") as GeoJSONSource | undefined)?.setData(data.stops);
+    };
+
+    const ensureOverlay = () => {
+      const map = mapRef.current;
+      const deck = deckRef.current;
+      if (!map || !deck) return null;
+      if (!overlayRef.current) {
+        overlayRef.current = new deck.MapboxOverlay({ interleaved: true, layers: [] });
+        map.addControl(overlayRef.current);
+      }
+      return overlayRef.current;
+    };
+
+    const follow = (tip: LngLat, km: number) => {
+      const map = mapRef.current;
+      if (!map || reduced || followPaused.current) return;
+      const center = map.getCenter();
+      const dLon = ((tip[0] - center.lng + 540) % 360) - 180;
+      const zoom = map.getZoom();
+      const nextZoom = zoom + (zoomForSpan(km) - zoom) * 0.04;
+      const pitch = map.getPitch();
+      map.jumpTo({
+        center: [center.lng + dLon * 0.07, center.lat + (tip[1] - center.lat) * 0.07],
+        zoom: nextZoom,
+        // Tilt the camera so the arcs visibly rise off the globe.
+        pitch: pitch + (followPitch(nextZoom) - pitch) * 0.05,
+      });
+    };
+
+    const frameWholeRoute = () => {
+      const map = mapRef.current;
+      if (!map || !route.bounds || followPaused.current || framedWhole.current) return;
+      framedWhole.current = true;
+      const [[w, s], [e, n]] = route.bounds;
+      if (e - w > 90 || n - s > 60) {
+        const toRad = Math.PI / 180;
+        const x = route.stops.reduce((sum, stop) => sum + Math.cos(stop.coord[0] * toRad), 0);
+        const y = route.stops.reduce((sum, stop) => sum + Math.sin(stop.coord[0] * toRad), 0);
+        const lat = route.stops.reduce((sum, stop) => sum + stop.coord[1], 0) / route.stops.length;
+        map.easeTo({ center: [Math.atan2(y, x) / toRad, Math.max(-50, Math.min(50, lat))], zoom: 1.6, pitch: followPitch(1.6), duration: 2000 });
+      } else if (e - w > 0.5 || n - s > 0.5) {
+        map.fitBounds(route.bounds, { padding: { top: 120, right: 60, bottom: 60, left: 60 }, maxZoom: 5, pitch: 40, duration: 2000 });
       }
     };
 
-    const fullLine = route.line.geometry.coordinates as LngLat[];
-    let settled = false;
     let frame = 0;
+    let settled = false;
 
     const render = (time: number) => {
-      const progress = segments.map((f) => {
-        const slot = schedule.current.get(f.properties.key)!;
+      const map = mapRef.current;
+      const progress = arcs.map((arc) => {
+        const slot = schedule.current.get(arc.key)!;
         return slot.duration === 0 ? 1 : Math.min(1, Math.max(0, (time - slot.start) / slot.duration));
       });
+      const drawingIndex = progress.findIndex((p) => p > 0 && p < 1);
       const drawing = progress.some((p) => p < 1);
+      const currentTheme = latest.current.theme;
 
+      // Ground tracks and stops (MapLibre), revealed in step with the arcs.
       if (drawing || !settled) {
         const visibleSegments: Feature[] = [];
-        const visibleGround: Feature[] = [];
-        const tips: Feature[] = [];
         segments.forEach((f, i) => {
-          const p = progress[i];
-          if (p <= 0) return;
-          const eased = easeInOutCubic(p);
-          const arc = sliceLine(f.geometry.coordinates as LngLat[], eased);
-          const track = sliceLine(grounds[i].geometry.coordinates as LngLat[], eased);
-          visibleSegments.push({ ...f, geometry: { type: "LineString", coordinates: arc } });
-          visibleGround.push({ ...grounds[i], geometry: { type: "LineString", coordinates: track } });
-          if (p < 1) tips.push(point(arc.at(-1)!));
+          if (progress[i] <= 0) return;
+          const track = sliceLine(f.geometry.coordinates as LngLat[], easeInOutCubic(progress[i]));
+          visibleSegments.push({ ...f, geometry: { type: "LineString", coordinates: track } });
         });
-        // A stop shows once the segment leading to it has arrived.
-        const firstStopVisible = stops.slice(0, 1);
-        const reachedStops = stops.slice(1).filter((_, i) => progress[i] >= 1);
-        push({
-          segments: collection(visibleSegments),
-          ground: collection(visibleGround),
-          stops: collection([...firstStopVisible, ...reachedStops]),
-          pulse: collection(tips),
-        });
+        const reached = stops.slice(1).filter((_, i) => progress[i] >= 1);
+        pushMapData({ segments: collection(visibleSegments), stops: collection([...stops.slice(0, 1), ...reached]) });
         settled = !drawing;
       }
 
-      if (!drawing && !reduced && fullLine.length > 1) {
-        pulseClock.current ??= time;
-        const duration = Math.min(9000, Math.max(3000, fullLine.length * 25));
-        const t = ((time - pulseClock.current) % duration) / duration;
-        const travelled = sliceLine(fullLine, easeInOutCubic(t));
-        push({ pulse: collection([point(travelled.at(-1)!)]) });
-      } else if (!drawing && settled && (reduced || fullLine.length <= 1)) {
-        push({ pulse: EMPTY });
-        return;
+      // 3D arcs, glow and pulse (deck.gl).
+      const overlay = ensureOverlay();
+      const deck = deckRef.current;
+      if (overlay && deck && map) {
+        const opacity = arcOpacity(map.getZoom());
+        const drawn: DrawnArc[] = [];
+        const glow: DrawnArc[] = [];
+        let tip: Position3 | null = null;
+        arcs.forEach((arc, i) => {
+          if (progress[i] <= 0) return;
+          const path = sliceLine(arc.path, easeInOutCubic(progress[i]));
+          drawn.push(colorize(arc, path, currentTheme, 255));
+          glow.push(colorize(arc, path, currentTheme, currentTheme === "dark" ? 70 : 55));
+          if (i === drawingIndex) tip = path.at(-1)!;
+        });
+
+        let pulse: Position3 | null = tip;
+        if (!drawing && !reduced && fullPath.length > 1) {
+          pulseClock.current ??= time;
+          const period = Math.min(10_000, Math.max(3500, fullPath.length * 30));
+          const t = ((time - pulseClock.current) % period) / period;
+          pulse = sliceLine(fullPath, easeInOutCubic(t)).at(-1)!;
+        }
+
+        overlay.setProps({
+          layers: [
+            new deck.PathLayer<DrawnArc>({
+              id: "arc-glow",
+              data: glow,
+              getPath: (d) => d.path,
+              getColor: (d) => d.colors,
+              getWidth: 9,
+              widthUnits: "pixels",
+              capRounded: true,
+              jointRounded: true,
+              billboard: true,
+              opacity,
+              updateTriggers: { getPath: time, getColor: time },
+            }),
+            new deck.PathLayer<DrawnArc>({
+              id: "arc-line",
+              data: drawn,
+              getPath: (d) => d.path,
+              getColor: (d) => d.colors,
+              getWidth: 2.5,
+              widthUnits: "pixels",
+              capRounded: true,
+              jointRounded: true,
+              billboard: true,
+              opacity,
+              updateTriggers: { getPath: time, getColor: time },
+            }),
+            new deck.ScatterplotLayer<Position3>({
+              id: "arc-pulse",
+              data: pulse ? [pulse] : [],
+              getPosition: (d) => d,
+              getRadius: 5,
+              radiusUnits: "pixels",
+              getFillColor: currentTheme === "dark" ? [255, 255, 255, 255] : [23, 71, 181, 255],
+              stroked: true,
+              getLineColor: currentTheme === "dark" ? [126, 232, 255, 110] : [23, 71, 181, 70],
+              getLineWidth: 6,
+              lineWidthUnits: "pixels",
+              opacity,
+              updateTriggers: { getPosition: time },
+            }),
+          ],
+        });
       }
-      frame = requestAnimationFrame(render);
+
+      if (drawingIndex >= 0) {
+        const track = segments[drawingIndex].geometry.coordinates as LngLat[];
+        follow(sliceLine(track, easeInOutCubic(progress[drawingIndex])).at(-1)!, arcs[drawingIndex].km);
+      } else if (!drawing && latest.current.finished) {
+        frameWholeRoute();
+      }
+
+      // Keep ticking while drawing, pulsing, or waiting for deck.gl to arrive.
+      const waitingForDeck = arcs.length > 0 && !(overlay && deck);
+      const idle = !drawing && settled && (reduced || fullPath.length <= 1) && !waitingForDeck;
+      if (!idle) frame = requestAnimationFrame(render);
     };
 
     frame = requestAnimationFrame(render);
     return () => cancelAnimationFrame(frame);
-  }, [route]);
+  }, [route, finished]);
 
   return <div ref={containerRef} className="trace-map" role="region" aria-label="Route map" />;
 }

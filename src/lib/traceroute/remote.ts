@@ -6,7 +6,7 @@ import type { LineSource } from "./session";
  * and event stream serve local and remote traces. The header goes to stderr
  * and hops to stdout, as the system traceroute does.
  */
-export function remoteLineSource(run: () => Promise<string[]>): LineSource {
+export function remoteLineSource(run: () => Promise<string[]>, signal: AbortSignal): LineSource {
   let resolveExit: (code: number | null) => void = () => {};
   const exit = new Promise<number | null>((resolve) => (resolveExit = resolve));
 
@@ -17,7 +17,8 @@ export function remoteLineSource(run: () => Promise<string[]>): LineSource {
       for (const line of hops) yield { stream: "stdout" as const, line };
       resolveExit(0);
     } catch (error) {
-      if (error instanceof Error && error.message === "aborted") {
+      // Any error after a cancel (AbortError, TimeoutError, …) is just the cancel.
+      if (signal.aborted) {
         resolveExit(null);
         return;
       }

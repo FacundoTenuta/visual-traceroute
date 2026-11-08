@@ -26,6 +26,7 @@ describe("GET /api/probes", () => {
     const body = await res.json();
     expect(body.nearest).toBe("es-madrid");
     expect(body.local).toBe(false);
+    expect(body.remote).toBe(true);
     expect(body.locations).toHaveLength(2);
     expect(body.locations[0]).toEqual(LOCATIONS[0]);
   });
@@ -34,6 +35,14 @@ describe("GET /api/probes", () => {
     origin.mockResolvedValueOnce({ lat: -31.4, lon: -64.2 } as never);
     const body = await (await GET(new Request("http://localhost/api/probes"))).json();
     expect(body.nearest).toBe("ar-buenos-aires");
+  });
+
+  it("does not cache an empty list when Globalping cannot be reached", async () => {
+    const { probeCatalog } = await import("@/lib/globalping/catalog");
+    vi.mocked(probeCatalog.locations).mockRejectedValueOnce(new Error("down"));
+    const res = await GET(new Request("http://localhost/api/probes"));
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toMatchObject({ locations: [], nearest: null, remote: false });
   });
 
   it("tells the client when local traces are available", async () => {

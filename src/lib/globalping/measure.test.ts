@@ -106,6 +106,19 @@ describe("createGlobalpingClient", () => {
     );
   });
 
+  it("cleans the remote failure reason before showing it", async () => {
+    const failed = { ...finished, status: "failed" as const, rawOutput: `traceroute: unknown host \u001b[31mevil\u0007 ${"x".repeat(300)}` };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(json({ id: "m1" }, 202))
+      .mockResolvedValueOnce(json({ status: "finished", results: [{ probe, result: failed }] }));
+    const client = createGlobalpingClient({ fetchImpl, sleep: async () => {} });
+    const error = await client.traceroute({ target: "x.com", location, signal: new AbortController().signal }).catch((e) => e);
+    expect(error.message.startsWith("The remote trace failed: unknown host [31mevil ")).toBe(true);
+    expect(error.message).not.toMatch(/[\u0000-\u001f]/);
+    expect(error.message.length).toBeLessThanOrEqual(150);
+  });
+
   it("gives up when the measurement takes too long", async () => {
     let t = 0;
     const fetchImpl = vi.fn<typeof fetch>(async (url) =>

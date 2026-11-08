@@ -88,7 +88,7 @@ export async function GET(request: Request) {
           const out = await globalping.traceroute({ target: result.value, location, signal: controller.signal });
           probeGeo = probeToGeo(out.probe);
           return toTracerouteLines(result.value, out.result);
-        });
+        }, controller.signal);
         traceOrigin = async () => probeGeo;
       } else {
         source = spawnTraceroute(result.value, controller.signal);

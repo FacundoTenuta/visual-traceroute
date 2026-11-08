@@ -89,6 +89,15 @@ export function probeToGeo(probe: GpProbe): GeoInfo {
   };
 }
 
+/** First line of a third-party error, without control characters and capped, so it is safe to show. */
+function cleanReason(rawOutput: string): string {
+  return (rawOutput.split("\n")[0] ?? "")
+    .replace(/^traceroute:\s*/i, "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 120);
+}
+
 const minutes = (seconds: number) => {
   const m = Math.max(1, Math.ceil(seconds / 60));
   return m === 1 ? "a minute" : `about ${m} minutes`;
@@ -169,7 +178,7 @@ export function createGlobalpingClient({
       const first = body.results[0];
       if (!first) throw new GlobalpingError("No probe answered for that location. Pick another one.");
       if (first.result.status !== "finished") {
-        const reason = first.result.rawOutput.split("\n")[0]?.replace(/^traceroute:\s*/i, "").trim();
+        const reason = cleanReason(first.result.rawOutput);
         throw new GlobalpingError(reason ? `The remote trace failed: ${reason}` : "The remote trace failed.");
       }
       return first;

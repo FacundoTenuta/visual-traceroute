@@ -18,17 +18,22 @@ async function visitorPosition(request: Request): Promise<{ lat: number; lon: nu
  * default origin) and whether this server can also trace locally.
  */
 export async function GET(request: Request) {
-  const [locations, position, local] = await Promise.all([
-    probeCatalog.locations().catch(() => []),
+  const [catalog, position, local] = await Promise.all([
+    probeCatalog.locations().then(
+      (list) => ({ ok: true, list }),
+      () => ({ ok: false, list: [] }),
+    ),
     visitorPosition(request),
     isLocalTraceAvailable(),
   ]);
+  const locations = catalog.list;
   const nearest = position ? (nearestLocation(locations, position.lat, position.lon)?.id ?? null) : null;
   // The busiest networks per city are enough to pick from and keep the payload small.
   const compact = locations.map((l) => ({ ...l, networks: l.networks.slice(0, MAX_NETWORKS) }));
   return Response.json(
-    { locations: compact, nearest, local },
-    // Per visitor (nearest depends on who asks), but cheap to reuse for a few minutes.
-    { headers: { "cache-control": "private, max-age=300" } },
+    { locations: compact, nearest, local, remote: catalog.ok },
+    // Per visitor (nearest depends on who asks), cheap to reuse for a few minutes;
+    // a failed lookup is never cached so the next visit can retry.
+    { headers: { "cache-control": catalog.ok ? "private, max-age=300" : "no-store" } },
   );
 }

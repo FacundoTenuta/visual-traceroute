@@ -33,6 +33,8 @@ export interface ProbeLocation {
 
 const PROBES_URL = "https://api.globalping.io/v1/probes";
 const TTL_MS = 10 * 60 * 1000;
+/** After a failed refresh, keep the stale list this long before trying again. */
+const RETRY_MS = 60 * 1000;
 const TIMEOUT_MS = 8000;
 
 const slug = (text: string) =>
@@ -112,8 +114,12 @@ export function createProbeCatalog({ fetchImpl = fetch, now = Date.now }: { fetc
         return list;
       })
       .catch((error) => {
-        // A stale list beats no list: probes rarely move.
-        if (cached) return cached.locations;
+        // A stale list beats no list: probes rarely move. Back off so an outage
+        // doesn't make every request wait for the fetch timeout.
+        if (cached) {
+          cached = { at: now() - TTL_MS + RETRY_MS, locations: cached.locations };
+          return cached.locations;
+        }
         throw error;
       })
       .finally(() => {

@@ -40,6 +40,23 @@ describe("nearestLocation", () => {
   });
 });
 
+describe("createProbeCatalog when Globalping is down", () => {
+  it("waits a minute before retrying after a failed refresh instead of retrying on every request", async () => {
+    let now = 0;
+    const ok = () => new Response(JSON.stringify(RAW), { status: 200 });
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(ok()).mockRejectedValue(new Error("down"));
+    const catalog = createProbeCatalog({ fetchImpl, now: () => now });
+    await catalog.locations();
+    now = 11 * 60 * 1000;
+    await catalog.locations();
+    await catalog.locations();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    now += 61_000;
+    await catalog.locations();
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("createProbeCatalog", () => {
   const response = () => new Response(JSON.stringify(RAW), { status: 200 });
 

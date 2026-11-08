@@ -34,6 +34,8 @@ export class GlobalpingError extends Error {
   constructor(
     message: string,
     readonly status?: number,
+    /** True when Globalping refused to create the measurement, so nothing ran or was charged. */
+    public notStarted = false,
   ) {
     super(message);
     this.name = "GlobalpingError";
@@ -164,7 +166,11 @@ export function createGlobalpingClient({
       }),
       signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
     });
-    if (!created.ok) throw await failure(created);
+    if (!created.ok) {
+      const error = await failure(created);
+      error.notStarted = true;
+      throw error;
+    }
     const { id } = (await created.json()) as { id: string };
 
     const startedAt = now();

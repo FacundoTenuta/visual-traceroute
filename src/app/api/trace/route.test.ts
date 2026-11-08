@@ -18,6 +18,7 @@ vi.mock("@/lib/globalping/measure", async (importOriginal) => ({
 
 const { GET } = await import("./route");
 const { traceLimiter } = await import("@/lib/traceroute/limiter");
+const { remoteQuota } = await import("@/lib/traceroute/quota");
 
 function fakeSource(stdout: string[]) {
   async function* lines() {
@@ -221,6 +222,7 @@ describe("GET /api/trace from a remote location", () => {
     findLocation.mockReset();
     remoteTraceroute.mockReset();
     spawnTraceroute.mockReset();
+    remoteQuota.reset();
   });
 
   it("traces from the chosen location and reports the probe as the origin", async () => {
@@ -300,6 +302,7 @@ describe("GET /api/trace from a remote location", () => {
     }
     const over = await GET(new Request("http://localhost/api/trace?target=cloudflare.com&from=es-madrid", { headers: visitor }));
     expect(over.status).toBe(429);
+    expect(Number(over.headers.get("retry-after"))).toBeGreaterThan(3500);
     expect((await over.json()).error).toMatch(/^You've used your 10 remote traces for this hour\. Try again in about (60|59) minutes\.$/);
     expect(remoteTraceroute).toHaveBeenCalledTimes(10);
 
@@ -314,12 +317,53 @@ describe("GET /api/trace from a remote location", () => {
   it("does not count local traces against the remote quota", async () => {
     vi.stubEnv("TRUST_PROXY", "1");
     spawnTraceroute.mockImplementation(() => fakeSource([" 1  1.1.1.1  4.2 ms"]));
+    findLocation.mockResolvedValue(MADRID);
+    remoteTraceroute.mockResolvedValue({ probe, result });
     const visitor = { "x-forwarded-for": "198.51.100.90" };
     for (let i = 0; i < 12; i++) {
       const res = await GET(new Request("http://localhost/api/trace?target=1.1.1.1", { headers: visitor }));
       expect(res.status).toBe(200);
       await res.text();
     }
+    // The full remote allowance is still there after all those local traces.
+    for (let i = 0; i < 10; i++) {
+      const res = await GET(new Request("http://localhost/api/trace?target=cloudflare.com&from=es-madrid", { headers: visitor }));
+      expect(res.status).toBe(200);
+      await res.text();
+    }
+    vi.unstubAllEnvs();
+  });
+
+  it("gives the slot back when Globalping refuses to start the measurement", async () => {
+    const { GlobalpingError } = await import("@/lib/globalping/measure");
+    vi.stubEnv("TRUST_PROXY", "1");
+    findLocation.mockResolvedValue(MADRID);
+    remoteTraceroute.mockRejectedValue(new GlobalpingError("No probe is online in that location right now.", 422, true));
+    const visitor = { "x-forwarded-for": "198.51.100.91" };
+    for (let i = 0; i < 12; i++) {
+      const res = await GET(new Request("http://localhost/api/trace?target=cloudflare.com&from=es-madrid", { headers: visitor }));
+      expect(res.status).toBe(200);
+      await res.text();
+    }
+    vi.unstubAllEnvs();
+  });
+
+  it("treats every address in one IPv6 /64 as the same visitor", async () => {
+    vi.stubEnv("TRUST_PROXY", "1");
+    findLocation.mockResolvedValue(MADRID);
+    remoteTraceroute.mockResolvedValue({ probe, result });
+    for (let i = 0; i < 10; i++) {
+      const res = await GET(
+        new Request("http://localhost/api/trace?target=cloudflare.com&from=es-madrid", {
+          headers: { "x-forwarded-for": `2001:db8:1:2::${(i + 1).toString(16)}` },
+        }),
+      );
+      await res.text();
+    }
+    const rotated = await GET(
+      new Request("http://localhost/api/trace?target=cloudflare.com&from=es-madrid", { headers: { "x-forwarded-for": "2001:db8:1:2:dead:beef::1" } }),
+    );
+    expect(rotated.status).toBe(429);
     vi.unstubAllEnvs();
   });
 

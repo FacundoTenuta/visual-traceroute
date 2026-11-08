@@ -94,7 +94,8 @@ describe("createGlobalpingClient", () => {
     const fetchImpl = vi.fn<typeof fetch>(async () => json({ error: { message: "Too many" } }, 429, { "x-ratelimit-reset": "1800" }));
     const client = createGlobalpingClient({ fetchImpl, sleep: async () => {} });
     await expect(client.traceroute({ target: "x.com", location, signal: new AbortController().signal })).rejects.toEqual(
-      new GlobalpingError("The remote tracing network's hourly limit is used up. Try again in about 30 minutes.", 429),
+      // Refused at creation: nothing ran, so the visitor's own quota is refunded upstream.
+      new GlobalpingError("The remote tracing network's hourly limit is used up. Try again in about 30 minutes.", 429, true),
     );
   });
 

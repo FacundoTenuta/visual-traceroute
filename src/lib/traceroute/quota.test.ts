@@ -74,3 +74,34 @@ describe("remoteTracesPerHour", () => {
     expect(remoteTracesPerHour("2.5")).toBe(10);
   });
 });
+
+describe("quota keys and refunds", () => {
+  it("counts a whole IPv6 /64 as one visitor, since one client controls all of it", async () => {
+    const { quotaKey } = await import("./quota");
+    expect(quotaKey("2001:db8:abcd:12:1::1")).toBe(quotaKey("2001:db8:abcd:12:ffff:ffff:ffff:fffe"));
+    expect(quotaKey("2001:db8:abcd:12::1")).toBe("2001:db8:abcd:12::/64");
+    expect(quotaKey("2001:db8:abcd:13::1")).not.toBe(quotaKey("2001:db8:abcd:12::1"));
+    expect(quotaKey("::1")).toBe("0:0:0:0::/64");
+  });
+
+  it("keeps IPv4 addresses (also IPv4-mapped ones) as they are", async () => {
+    const { quotaKey } = await import("./quota");
+    expect(quotaKey("198.51.100.7")).toBe("198.51.100.7");
+    expect(quotaKey("::ffff:198.51.100.7")).toBe("198.51.100.7");
+    expect(quotaKey("local")).toBe("local");
+  });
+
+  it("gives a slot back with refund", () => {
+    const { quota } = setup(1);
+    quota.take("a");
+    quota.refund("a");
+    expect(quota.take("a").ok).toBe(true);
+    quota.refund("unknown");
+  });
+
+  it("phrases the limit message in singular and plural", async () => {
+    const { quotaMessage } = await import("./quota");
+    expect(quotaMessage(10, 3600)).toBe("You've used your 10 remote traces for this hour. Try again in about 60 minutes.");
+    expect(quotaMessage(1, 30)).toBe("You've used your 1 remote trace for this hour. Try again in about a minute.");
+  });
+});

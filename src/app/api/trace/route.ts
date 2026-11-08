@@ -1,11 +1,11 @@
 import { probeCatalog } from "@/lib/globalping/catalog";
-import { globalping, probeToGeo, toTracerouteLines, type GpLocation } from "@/lib/globalping/measure";
+import { GlobalpingError, globalping, probeToGeo, toTracerouteLines, type GpLocation } from "@/lib/globalping/measure";
 import { ipApi } from "@/lib/geo/ip-api";
 import { reverseDns } from "@/lib/geo/reverse-dns";
 import { runTraceSession } from "@/lib/traceroute/session";
 import { isLocalTraceAvailable } from "@/lib/traceroute/available";
 import { traceLimiter } from "@/lib/traceroute/limiter";
-import { HourlyQuota, remoteTracesPerHour } from "@/lib/traceroute/quota";
+import { quotaKey, quotaMessage, remoteQuota } from "@/lib/traceroute/quota";
 import { remoteLineSource } from "@/lib/traceroute/remote";
 import type { LineSource } from "@/lib/traceroute/session";
 import { spawnTraceroute } from "@/lib/traceroute/spawn";
@@ -29,15 +29,6 @@ function clientKey(request: Request): string | null {
 
 const encoder = new TextEncoder();
 const frame = (event: TraceEvent) => encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
-
-/** Each visitor's share of the Globalping quota (all visitors share one account). */
-const REMOTE_PER_HOUR = remoteTracesPerHour(process.env.REMOTE_TRACES_PER_HOUR);
-const remoteQuota = new HourlyQuota({ limit: REMOTE_PER_HOUR });
-
-const waitText = (seconds: number) => {
-  const minutes = Math.max(1, Math.ceil(seconds / 60));
-  return minutes === 1 ? "about a minute" : `about ${minutes} minutes`;
-};
 
 const badRequest = (error: string) => Response.json({ error }, { status: 400 });
 
@@ -81,14 +72,13 @@ export async function GET(request: Request) {
   const slot = traceLimiter.acquire(visitor);
   if (!slot.ok) return Response.json({ error: slot.error }, { status: 429 });
   // Checked after the concurrency slot so a rejected request never spends quota.
+  const quotaOwner = quotaKey(visitor ?? "local");
   if (origin.remote) {
-    const quota = remoteQuota.take(visitor ?? "local");
+    const quota = remoteQuota.take(quotaOwner);
     if (!quota.ok) {
       slot.release();
       return Response.json(
-        {
-          error: `You've used your ${REMOTE_PER_HOUR} remote traces for this hour. Try again in ${waitText(quota.retryAfterS)}.`,
-        },
+        { error: quotaMessage(remoteQuota.max, quota.retryAfterS) },
         { status: 429, headers: { "retry-after": String(quota.retryAfterS) } },
       );
     }
@@ -117,7 +107,13 @@ export async function GET(request: Request) {
         const location = origin.remote;
         let probeGeo: GeoInfo | null = null;
         source = remoteLineSource(async () => {
-          const out = await globalping.traceroute({ target: result.value, location, signal: controller.signal });
+          const out = await globalping
+            .traceroute({ target: result.value, location, signal: controller.signal })
+            .catch((error: unknown) => {
+              // Globalping never ran (or charged) it: give the visitor's slot back.
+              if (error instanceof GlobalpingError && error.notStarted) remoteQuota.refund(quotaOwner);
+              throw error;
+            });
           probeGeo = probeToGeo(out.probe);
           return toTracerouteLines(result.value, out.result);
         }, controller.signal);

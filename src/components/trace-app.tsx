@@ -121,8 +121,9 @@ export function TraceApp() {
                 location, network and round-trip time.
               </p>
               <p className="intro__note">
-                Pick where the trace starts: this computer, or any of {probes.locations.length ? probes.locations.length.toLocaleString("en-US") : "1,000+"} cities with
-                probes. You can also click a dot on the globe.
+                {probes.local ? "Pick where the trace starts: this computer, or any of " : "Pick where the trace starts: any of "}
+                {probes.locations.length ? probes.locations.length.toLocaleString("en-US") : "1,000+"} cities with probes. You
+                can also click a dot on the globe.
               </p>
               <div className="intro__suggestions" aria-label="Try a host">
                 {SUGGESTIONS.map((host) => (

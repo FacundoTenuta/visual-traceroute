@@ -2,7 +2,12 @@
 
 Trace the network path to any host and follow every hop on a 3D globe that turns into a street map as you zoom in.
 
-The server runs the system `traceroute` and streams each hop to the browser as it answers. Every hop is enriched with reverse DNS and an approximate location from [ip-api.com](https://ip-api.com). The panel shows per-hop IP, hostname, location, ASN/ISP, min/avg/max round-trip time and packet loss.
+Pick where the trace starts:
+
+- **This computer**: the server runs the system `traceroute` and streams each hop as it answers (local or self-hosted installs).
+- **Any of ~1,100 cities**: the trace runs on a [Globalping](https://globalping.io) probe in that city (optionally on one network there), then the route draws hop by hop. This mode only needs HTTP, so it works on Vercel. By default the app suggests the probe city nearest to the visitor.
+
+Every hop is enriched with reverse DNS and an approximate location from [ip-api.com](https://ip-api.com). The panel shows per-hop IP, hostname, location, ASN/ISP, min/avg/max round-trip time and packet loss.
 
 ## Run it
 
@@ -13,19 +18,32 @@ pnpm dev
 
 Open http://localhost:3000.
 
-Traces start from the machine running the app, so run it locally. Serverless hosts usually cannot send the probes traceroute needs.
+Locally both modes are available. Serverless hosts cannot run traceroute, so there only remote locations are offered.
+
+## Deploy on Vercel
+
+1. Import the repository in Vercel (framework: Next.js) or run `vercel` from the project folder.
+2. Set these environment variables (Project → Settings → Environment Variables):
+   - `TRACE_LOCAL=0`: there is no traceroute binary, so only remote locations are offered.
+   - `TRUST_PROXY=1`: Vercel overwrites `X-Forwarded-For`, so the per-visitor limit can trust it.
+   - `GLOBALPING_TOKEN` (recommended): without it, every visitor shares Globalping's anonymous limit of 250 tests per hour for the server's IP.
+3. Deploy. The visitor's nearest probe city comes from Vercel's `x-vercel-ip-latitude`/`x-vercel-ip-longitude` headers.
+
+Before using it commercially, note that ip-api's free endpoint is for non-commercial use: set `IPAPI_KEY` (Pro) or swap in another geolocation source.
 
 ## Requirements
 
 - Node.js 22+ and pnpm
-- `traceroute` on the `PATH` (preinstalled on macOS; `apt install traceroute` on Debian/Ubuntu)
-- Internet access to `ip-api.com` (geolocation) and `tiles.openfreemap.org` (map tiles). No API keys needed.
+- `traceroute` on the `PATH` for local traces (preinstalled on macOS; `apt install traceroute` on Debian/Ubuntu)
+- Internet access to `ip-api.com` (geolocation), `tiles.openfreemap.org` (map tiles) and `api.globalping.io` (remote traces). No API keys needed.
 
 ## Configuration
 
 | Variable | Effect |
 | --- | --- |
 | `IPAPI_KEY` | Optional ip-api Pro key. When set, lookups use the HTTPS endpoint `pro.ip-api.com` with a local budget of 1,000 per minute; without it they use the free HTTP endpoint. |
+| `GLOBALPING_TOKEN` | Optional Globalping API token for remote traces; raises the hourly limit, which is otherwise shared by every visitor of a deployment. |
+| `TRACE_LOCAL` | Set to `0` to turn off traces from this computer (they are offered automatically when `traceroute` is found on the `PATH`). |
 | `TRUST_PROXY` | Set to `1` only behind a proxy that overwrites `X-Forwarded-For`. Enables the per-client limit; otherwise forwarding headers are ignored because any caller could forge them. |
 
 ## Scripts
@@ -48,4 +66,6 @@ Traces start from the machine running the app, so run it locally. Serverless hos
 
 ## API
 
-`GET /api/trace?target=<host-or-ipv4>` returns `text/event-stream`. Each `data:` frame is a JSON event: `start`, `origin`, `destination`, `hop` (sent again whenever the hop gains more detail), then `done` or `error`. Invalid targets get `400` and busy limits get `429`, both with `{ "error": "..." }`.
+`GET /api/probes` lists the cities you can trace from, the one nearest the caller, and whether local traces are available.
+
+`GET /api/trace?target=<host-or-ipv4>[&from=<city id>[&asn=<network>]]` returns `text/event-stream`. Each `data:` frame is a JSON event: `start`, `origin`, `destination`, `hop` (sent again whenever the hop gains more detail), then `done` or `error`. Invalid targets get `400` and busy limits get `429`, both with `{ "error": "..." }`.

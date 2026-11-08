@@ -6,6 +6,15 @@ vi.mock("@/lib/geo/ip-api", () => ({
   ipApi: { geolocate: vi.fn(async () => null), origin: vi.fn(async () => null) },
 }));
 vi.mock("@/lib/geo/reverse-dns", () => ({ reverseDns: vi.fn(async () => null) }));
+const localAvailable = vi.fn(async () => true);
+vi.mock("@/lib/traceroute/available", () => ({ isLocalTraceAvailable: localAvailable }));
+const findLocation = vi.fn();
+vi.mock("@/lib/globalping/catalog", () => ({ probeCatalog: { find: findLocation, locations: vi.fn(async () => []) } }));
+const remoteTraceroute = vi.fn();
+vi.mock("@/lib/globalping/measure", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/globalping/measure")>()),
+  globalping: { traceroute: remoteTraceroute },
+}));
 
 const { GET } = await import("./route");
 const { traceLimiter } = await import("@/lib/traceroute/limiter");
@@ -176,5 +185,99 @@ describe("GET /api/trace limits", () => {
     after.controller.abort();
     vi.useRealTimers();
     await waitForIdle();
+  });
+});
+
+describe("GET /api/trace from a remote location", () => {
+  const MADRID = {
+    id: "es-madrid",
+    city: "Madrid",
+    country: "ES",
+    continent: "EU",
+    lat: 40.42,
+    lon: -3.7,
+    probes: 4,
+    networks: [{ asn: 8560, network: "IONOS SE", probes: 3 }],
+  };
+  const probe = { country: "ES", city: "Madrid", asn: 8560, network: "IONOS SE", latitude: 40.42, longitude: -3.7 };
+  const result = {
+    status: "finished",
+    rawOutput: "traceroute to cloudflare.com (104.16.133.229), 20 hops max, 60 byte packets",
+    resolvedAddress: "104.16.133.229",
+    resolvedHostname: "cloudflare.com",
+    hops: [
+      { resolvedAddress: "212.227.121.218", resolvedHostname: null, timings: [{ rtt: 0.8 }] },
+      { resolvedAddress: null, resolvedHostname: null, timings: [] },
+      { resolvedAddress: "104.16.133.229", resolvedHostname: "cloudflare.com", timings: [{ rtt: 10.6 }] },
+    ],
+  };
+  const events = async (res: Response) =>
+    (await res.text())
+      .split("\n\n")
+      .filter(Boolean)
+      .map((chunk) => JSON.parse(chunk.replace(/^data: /, "")));
+
+  beforeEach(() => {
+    findLocation.mockReset();
+    remoteTraceroute.mockReset();
+    spawnTraceroute.mockReset();
+  });
+
+  it("traces from the chosen location and reports the probe as the origin", async () => {
+    findLocation.mockResolvedValue(MADRID);
+    remoteTraceroute.mockResolvedValue({ probe, result });
+    const res = await GET(new Request("http://localhost/api/trace?target=cloudflare.com&from=es-madrid"));
+    expect(res.status).toBe(200);
+    const list = await events(res);
+    expect(list[0]).toEqual({ type: "start", target: "cloudflare.com", ip: "104.16.133.229", maxHops: 20 });
+    expect(list).toContainEqual({ type: "origin", geo: expect.objectContaining({ city: "Madrid", lat: 40.42, isp: "IONOS SE" }) });
+    expect(list.filter((e) => e.type === "hop").at(-1).hop.hop).toBe(3);
+    expect(list.at(-1)).toMatchObject({ type: "done", hops: 3, reached: true });
+    expect(remoteTraceroute.mock.calls[0][0]).toMatchObject({
+      target: "cloudflare.com",
+      location: { country: "ES", city: "Madrid" },
+    });
+    expect(spawnTraceroute).not.toHaveBeenCalled();
+  });
+
+  it("can pin a network inside the chosen city", async () => {
+    findLocation.mockResolvedValue(MADRID);
+    remoteTraceroute.mockResolvedValue({ probe, result });
+    await (await GET(new Request("http://localhost/api/trace?target=cloudflare.com&from=es-madrid&asn=8560"))).text();
+    expect(remoteTraceroute.mock.calls[0][0].location).toEqual({ country: "ES", city: "Madrid", asn: 8560 });
+  });
+
+  it("rejects an origin that is not in the probe catalog", async () => {
+    findLocation.mockResolvedValue(null);
+    const res = await GET(new Request("http://localhost/api/trace?target=cloudflare.com&from=xx-nowhere"));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Unknown trace origin. Pick a location from the list." });
+    expect(remoteTraceroute).not.toHaveBeenCalled();
+  });
+
+  it("rejects a network that has no probes in that city", async () => {
+    findLocation.mockResolvedValue(MADRID);
+    const res = await GET(new Request("http://localhost/api/trace?target=cloudflare.com&from=es-madrid&asn=3352"));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "That network has no probes in Madrid." });
+  });
+
+  it("streams the remote service's error as a readable message", async () => {
+    const { GlobalpingError } = await import("@/lib/globalping/measure");
+    findLocation.mockResolvedValue(MADRID);
+    remoteTraceroute.mockRejectedValue(
+      new GlobalpingError("The remote tracing network's hourly limit is used up. Try again in about 30 minutes.", 429),
+    );
+    const list = await events(await GET(new Request("http://localhost/api/trace?target=cloudflare.com&from=es-madrid")));
+    expect(list).toEqual([
+      { type: "error", message: "The remote tracing network's hourly limit is used up. Try again in about 30 minutes." },
+    ]);
+  });
+
+  it("asks for a location when this server cannot trace locally", async () => {
+    localAvailable.mockResolvedValueOnce(false);
+    const res = await GET(new Request("http://localhost/api/trace?target=cloudflare.com"));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "This server can't run traceroute. Pick a location to trace from." });
   });
 });

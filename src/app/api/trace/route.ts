@@ -1,10 +1,15 @@
+import { probeCatalog } from "@/lib/globalping/catalog";
+import { globalping, probeToGeo, toTracerouteLines, type GpLocation } from "@/lib/globalping/measure";
 import { ipApi } from "@/lib/geo/ip-api";
 import { reverseDns } from "@/lib/geo/reverse-dns";
 import { runTraceSession } from "@/lib/traceroute/session";
+import { isLocalTraceAvailable } from "@/lib/traceroute/available";
 import { traceLimiter } from "@/lib/traceroute/limiter";
+import { remoteLineSource } from "@/lib/traceroute/remote";
+import type { LineSource } from "@/lib/traceroute/session";
 import { spawnTraceroute } from "@/lib/traceroute/spawn";
 import { validateTarget } from "@/lib/traceroute/target";
-import type { TraceEvent } from "@/lib/traceroute/types";
+import type { GeoInfo, TraceEvent } from "@/lib/traceroute/types";
 
 /** Hard stop for a single trace (30 hops x 3 probes x 2 s is about 3 minutes worst case). */
 const TRACE_TIMEOUT_MS = 150_000;
@@ -24,9 +29,35 @@ function clientKey(request: Request): string | null {
 const encoder = new TextEncoder();
 const frame = (event: TraceEvent) => encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
 
+const badRequest = (error: string) => Response.json({ error }, { status: 400 });
+
+/**
+ * Where to trace from: a probe location from the Globalping catalog (`from`,
+ * optionally narrowed to one network with `asn`), or this server. Only ids
+ * from the catalog are accepted, so no free-form input reaches the remote API.
+ */
+async function resolveOrigin(params: URLSearchParams): Promise<{ remote: GpLocation | null } | { error: string }> {
+  const from = params.get("from");
+  if (!from) {
+    return (await isLocalTraceAvailable())
+      ? { remote: null }
+      : { error: "This server can't run traceroute. Pick a location to trace from." };
+  }
+  const location = await probeCatalog.find(from).catch(() => null);
+  if (!location) return { error: "Unknown trace origin. Pick a location from the list." };
+  const asnParam = params.get("asn");
+  if (asnParam === null) return { remote: { country: location.country, city: location.city } };
+  const asn = Number(asnParam);
+  if (!location.networks.some((n) => n.asn === asn)) return { error: `That network has no probes in ${location.city}.` };
+  return { remote: { country: location.country, city: location.city, asn } };
+}
+
 export async function GET(request: Request) {
-  const result = validateTarget(new URL(request.url).searchParams.get("target") ?? "");
-  if (!result.ok) return Response.json({ error: result.error }, { status: 400 });
+  const params = new URL(request.url).searchParams;
+  const result = validateTarget(params.get("target") ?? "");
+  if (!result.ok) return badRequest(result.error);
+  const origin = await resolveOrigin(params);
+  if ("error" in origin) return badRequest(origin.error);
 
   const slot = traceLimiter.acquire(clientKey(request));
   if (!slot.ok) return Response.json({ error: slot.error }, { status: 429 });
@@ -48,15 +79,24 @@ export async function GET(request: Request) {
       const emit = (event: TraceEvent) => {
         if (!clientGone) sink.enqueue(frame(event));
       };
+      let source: LineSource;
+      let traceOrigin: () => Promise<GeoInfo | null> = ipApi.origin;
+      if (origin.remote) {
+        const location = origin.remote;
+        let probeGeo: GeoInfo | null = null;
+        source = remoteLineSource(async () => {
+          const out = await globalping.traceroute({ target: result.value, location, signal: controller.signal });
+          probeGeo = probeToGeo(out.probe);
+          return toTracerouteLines(result.value, out.result);
+        });
+        traceOrigin = async () => probeGeo;
+      } else {
+        source = spawnTraceroute(result.value, controller.signal);
+      }
       try {
         await runTraceSession(
           result.value,
-          {
-            source: spawnTraceroute(result.value, controller.signal),
-            geolocate: ipApi.geolocate,
-            origin: ipApi.origin,
-            reverseDns,
-          },
+          { source, geolocate: ipApi.geolocate, origin: traceOrigin, reverseDns },
           emit,
         );
       } catch {

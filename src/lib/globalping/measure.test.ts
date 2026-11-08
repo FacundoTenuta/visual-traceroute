@@ -98,6 +98,16 @@ describe("createGlobalpingClient", () => {
     );
   });
 
+  it("passes on why Globalping refused the target", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      json({ error: { type: "validation_error", message: "Parameter validation failed.", params: { target: "Private hostnames are not allowed.\u0007" } } }, 400),
+    );
+    const client = createGlobalpingClient({ fetchImpl, sleep: async () => {} });
+    await expect(client.traceroute({ target: "127.0.0.1", location, signal: new AbortController().signal })).rejects.toThrow(
+      "The remote tracing network refused the request: Private hostnames are not allowed.",
+    );
+  });
+
   it("reports when no probe matches the location", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () => json({ error: { type: "no_probes_found", message: "No suitable probes" } }, 422));
     const client = createGlobalpingClient({ fetchImpl, sleep: async () => {} });

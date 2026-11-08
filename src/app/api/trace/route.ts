@@ -36,14 +36,22 @@ const badRequest = (error: string) => Response.json({ error }, { status: 400 });
  * optionally narrowed to one network with `asn`), or this server. Only ids
  * from the catalog are accepted, so no free-form input reaches the remote API.
  */
-async function resolveOrigin(params: URLSearchParams): Promise<{ remote: GpLocation | null } | { error: string }> {
+async function resolveOrigin(
+  params: URLSearchParams,
+): Promise<{ remote: GpLocation | null } | { error: string; status?: number }> {
   const from = params.get("from");
+  if (!from && params.has("asn")) return { error: "Pick a location before choosing a network." };
   if (!from) {
     return (await isLocalTraceAvailable())
       ? { remote: null }
       : { error: "This server can't run traceroute. Pick a location to trace from." };
   }
-  const location = await probeCatalog.find(from).catch(() => null);
+  let location;
+  try {
+    location = await probeCatalog.find(from);
+  } catch {
+    return { error: "Remote locations are unavailable right now. Try again in a minute.", status: 503 };
+  }
   if (!location) return { error: "Unknown trace origin. Pick a location from the list." };
   const asnParam = params.get("asn");
   if (asnParam === null) return { remote: { country: location.country, city: location.city } };
@@ -57,7 +65,7 @@ export async function GET(request: Request) {
   const result = validateTarget(params.get("target") ?? "");
   if (!result.ok) return badRequest(result.error);
   const origin = await resolveOrigin(params);
-  if ("error" in origin) return badRequest(origin.error);
+  if ("error" in origin) return Response.json({ error: origin.error }, { status: origin.status ?? 400 });
 
   const slot = traceLimiter.acquire(clientKey(request));
   if (!slot.ok) return Response.json({ error: slot.error }, { status: 429 });

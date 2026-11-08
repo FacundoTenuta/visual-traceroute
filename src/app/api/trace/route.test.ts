@@ -274,6 +274,20 @@ describe("GET /api/trace from a remote location", () => {
     ]);
   });
 
+  it("rejects a network without a location instead of ignoring it", async () => {
+    const res = await GET(new Request("http://localhost/api/trace?target=127.0.0.1&asn=8560"));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Pick a location before choosing a network." });
+    expect(spawnTraceroute).not.toHaveBeenCalled();
+  });
+
+  it("says the location list is unavailable when it cannot be loaded", async () => {
+    findLocation.mockRejectedValue(new Error("down"));
+    const res = await GET(new Request("http://localhost/api/trace?target=cloudflare.com&from=es-madrid"));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "Remote locations are unavailable right now. Try again in a minute." });
+  });
+
   it("asks for a location when this server cannot trace locally", async () => {
     localAvailable.mockResolvedValueOnce(false);
     const res = await GET(new Request("http://localhost/api/trace?target=cloudflare.com"));

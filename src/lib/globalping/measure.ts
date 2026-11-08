@@ -104,7 +104,9 @@ const minutes = (seconds: number) => {
 };
 
 async function failure(res: Response): Promise<GlobalpingError> {
-  const body = (await res.json().catch(() => null)) as { error?: { type?: string; message?: string } } | null;
+  const body = (await res.json().catch(() => null)) as {
+    error?: { type?: string; message?: string; params?: Record<string, string> };
+  } | null;
   if (res.status === 429) {
     const reset = Number(res.headers.get("x-ratelimit-reset") ?? res.headers.get("retry-after") ?? 3600);
     return new GlobalpingError(
@@ -115,6 +117,9 @@ async function failure(res: Response): Promise<GlobalpingError> {
   if (body?.error?.type === "no_probes_found" || /no suitable probes/i.test(body?.error?.message ?? "")) {
     return new GlobalpingError("No probe is online in that location right now. Pick another one.", res.status);
   }
+  // Validation errors explain themselves per field (e.g. private targets); pass that on, cleaned.
+  const detail = Object.values(body?.error?.params ?? {}).find((v) => typeof v === "string");
+  if (detail) return new GlobalpingError(`The remote tracing network refused the request: ${cleanReason(detail)}`, res.status);
   return new GlobalpingError(`The remote tracing network refused the request (HTTP ${res.status}).`, res.status);
 }
 

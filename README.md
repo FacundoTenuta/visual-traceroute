@@ -43,6 +43,7 @@ Before using it commercially, note that ip-api's free endpoint is for non-commer
 | --- | --- |
 | `IPAPI_KEY` | Optional ip-api Pro key. When set, lookups use the HTTPS endpoint `pro.ip-api.com` with a local budget of 1,000 per minute; without it they use the free HTTP endpoint. |
 | `GLOBALPING_TOKEN` | Optional Globalping API token for remote traces; raises the hourly limit, which is otherwise shared by every visitor of a deployment. |
+| `REMOTE_TRACES_PER_HOUR` | Remote traces each visitor may start per sliding hour (default `10`). Protects the Globalping quota every visitor shares. |
 | `TRACE_LOCAL` | Set to `0` to turn off traces from this computer (they are offered automatically when `traceroute` is found on the `PATH`). |
 | `TRUST_PROXY` | Set to `1` only behind a proxy that overwrites `X-Forwarded-For`. Enables the per-client limit; otherwise forwarding headers are ignored because any caller could forge them. |
 
@@ -60,6 +61,7 @@ Before using it commercially, note that ip-api's free endpoint is for non-commer
 - IPv4 targets and hostnames only for now.
 - ip-api's free tier allows 45 lookups per minute. Without a key the app keeps itself under 40, pauses when ip-api reports the quota is used up, and caches results in memory (up to 2,000 addresses for 24 hours; unknown addresses for 5 minutes). Hops beyond the budget show no location.
 - Geolocation of backbone routers and anycast addresses (such as `1.1.1.1`) is approximate: it reflects where the address is registered, not always where the router is.
+- Each visitor may start 10 remote traces per hour (`REMOTE_TRACES_PER_HOUR`); local traces don't count. On a serverless host each instance keeps its own count, so the cap is approximate. Results are never cached: every trace is a fresh measurement.
 - At most 3 traces run at the same time. With `TRUST_PROXY=1`, each client (by `X-Forwarded-For`) may run at most 2 of them. A trace is stopped after 150 seconds and ends with the hops found so far.
 - Private hops (your own network) are shown by IP only: no reverse DNS or location, so internal hostnames are not exposed.
 - Numeric shorthand such as `0x7f.1` is rejected; use a full IPv4 address.

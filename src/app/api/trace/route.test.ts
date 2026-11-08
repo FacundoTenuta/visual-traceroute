@@ -288,6 +288,41 @@ describe("GET /api/trace from a remote location", () => {
     expect(await res.json()).toEqual({ error: "Remote locations are unavailable right now. Try again in a minute." });
   });
 
+  it("caps remote traces per visitor per hour and says how long to wait", async () => {
+    vi.stubEnv("TRUST_PROXY", "1");
+    findLocation.mockResolvedValue(MADRID);
+    remoteTraceroute.mockResolvedValue({ probe, result });
+    const visitor = { "x-forwarded-for": "198.51.100.77" };
+    for (let i = 0; i < 10; i++) {
+      const ok = await GET(new Request("http://localhost/api/trace?target=cloudflare.com&from=es-madrid", { headers: visitor }));
+      expect(ok.status).toBe(200);
+      await ok.text();
+    }
+    const over = await GET(new Request("http://localhost/api/trace?target=cloudflare.com&from=es-madrid", { headers: visitor }));
+    expect(over.status).toBe(429);
+    expect((await over.json()).error).toMatch(/^You've used your 10 remote traces for this hour\. Try again in about (60|59) minutes\.$/);
+    expect(remoteTraceroute).toHaveBeenCalledTimes(10);
+
+    const someoneElse = await GET(
+      new Request("http://localhost/api/trace?target=cloudflare.com&from=es-madrid", { headers: { "x-forwarded-for": "198.51.100.78" } }),
+    );
+    expect(someoneElse.status).toBe(200);
+    await someoneElse.text();
+    vi.unstubAllEnvs();
+  });
+
+  it("does not count local traces against the remote quota", async () => {
+    vi.stubEnv("TRUST_PROXY", "1");
+    spawnTraceroute.mockImplementation(() => fakeSource([" 1  1.1.1.1  4.2 ms"]));
+    const visitor = { "x-forwarded-for": "198.51.100.90" };
+    for (let i = 0; i < 12; i++) {
+      const res = await GET(new Request("http://localhost/api/trace?target=1.1.1.1", { headers: visitor }));
+      expect(res.status).toBe(200);
+      await res.text();
+    }
+    vi.unstubAllEnvs();
+  });
+
   it("asks for a location when this server cannot trace locally", async () => {
     localAvailable.mockResolvedValueOnce(false);
     const res = await GET(new Request("http://localhost/api/trace?target=cloudflare.com"));

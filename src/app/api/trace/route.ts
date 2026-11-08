@@ -5,6 +5,7 @@ import { reverseDns } from "@/lib/geo/reverse-dns";
 import { runTraceSession } from "@/lib/traceroute/session";
 import { isLocalTraceAvailable } from "@/lib/traceroute/available";
 import { traceLimiter } from "@/lib/traceroute/limiter";
+import { HourlyQuota, remoteTracesPerHour } from "@/lib/traceroute/quota";
 import { remoteLineSource } from "@/lib/traceroute/remote";
 import type { LineSource } from "@/lib/traceroute/session";
 import { spawnTraceroute } from "@/lib/traceroute/spawn";
@@ -28,6 +29,15 @@ function clientKey(request: Request): string | null {
 
 const encoder = new TextEncoder();
 const frame = (event: TraceEvent) => encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
+
+/** Each visitor's share of the Globalping quota (all visitors share one account). */
+const REMOTE_PER_HOUR = remoteTracesPerHour(process.env.REMOTE_TRACES_PER_HOUR);
+const remoteQuota = new HourlyQuota({ limit: REMOTE_PER_HOUR });
+
+const waitText = (seconds: number) => {
+  const minutes = Math.max(1, Math.ceil(seconds / 60));
+  return minutes === 1 ? "about a minute" : `about ${minutes} minutes`;
+};
 
 const badRequest = (error: string) => Response.json({ error }, { status: 400 });
 
@@ -67,8 +77,22 @@ export async function GET(request: Request) {
   const origin = await resolveOrigin(params);
   if ("error" in origin) return Response.json({ error: origin.error }, { status: origin.status ?? 400 });
 
-  const slot = traceLimiter.acquire(clientKey(request));
+  const visitor = clientKey(request);
+  const slot = traceLimiter.acquire(visitor);
   if (!slot.ok) return Response.json({ error: slot.error }, { status: 429 });
+  // Checked after the concurrency slot so a rejected request never spends quota.
+  if (origin.remote) {
+    const quota = remoteQuota.take(visitor ?? "local");
+    if (!quota.ok) {
+      slot.release();
+      return Response.json(
+        {
+          error: `You've used your ${REMOTE_PER_HOUR} remote traces for this hour. Try again in ${waitText(quota.retryAfterS)}.`,
+        },
+        { status: 429, headers: { "retry-after": String(quota.retryAfterS) } },
+      );
+    }
+  }
 
   // Aborting this controller kills traceroute; the session then finishes with
   // the hops found so far. `clientGone` stops writes once the caller left.

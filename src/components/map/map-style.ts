@@ -96,6 +96,8 @@ export interface RouteData {
   /** Hop pins (clustered). */
   stops: GeoJSON.FeatureCollection;
   origin: GeoJSON.FeatureCollection;
+  /** Cities with Globalping probes, pickable as trace origins. */
+  probes: GeoJSON.FeatureCollection;
 }
 
 /** Pins closer than this (px) merge into a cluster until CLUSTER_MAX_ZOOM. */
@@ -128,7 +130,12 @@ export const EMPTY: GeoJSON.FeatureCollection = { type: "FeatureCollection", fea
  * Builds the full map style. Route sources are part of the style so a theme
  * switch (`setStyle` with diffing) keeps the current route on screen.
  */
-export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: number | null): StyleSpecification {
+export function buildStyle(
+  theme: ResolvedTheme,
+  data: RouteData,
+  selectedHop: number | null,
+  selectedOrigin: string | null = null,
+): StyleSpecification {
   const p = PALETTES[theme];
   const selectedKey = selectedHop === null ? "__none__" : `,${selectedHop},`;
   const isSelected: ExpressionSpecification = ["in", selectedKey, ["get", "hopsKey"]];
@@ -164,6 +171,7 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
         },
       },
       origin: { type: "geojson", data: data.origin },
+      probes: { type: "geojson", data: data.probes },
     },
     layers: [
       { id: "background", type: "background", paint: { "background-color": p.land } },
@@ -304,6 +312,30 @@ export function buildStyle(theme: ResolvedTheme, data: RouteData, selectedHop: n
           "text-letter-spacing": 0.08,
         },
         paint: { "text-color": p.labelCountry, "text-halo-color": p.halo, "text-halo-width": 1.2, "text-opacity": 0.85 },
+      },
+      {
+        // Every city a trace can start from; click one to trace from there.
+        id: "probes",
+        type: "circle",
+        source: "probes",
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 2, 6, 4],
+          "circle-color": p.labelPlace,
+          "circle-opacity": 0.35,
+          "circle-stroke-width": 0,
+        },
+      },
+      {
+        id: "probes-selected",
+        type: "circle",
+        source: "probes",
+        filter: ["==", ["get", "id"], selectedOrigin ?? "__none__"],
+        paint: {
+          "circle-radius": 8,
+          "circle-color": "rgba(0, 0, 0, 0)",
+          "circle-stroke-width": 2,
+          "circle-stroke-color": p.labelPlace,
+        },
       },
       {
         // Shadow of each 3D jump on the surface; it gives the arc its height.

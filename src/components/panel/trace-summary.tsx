@@ -46,7 +46,7 @@ export function TraceSummary({ state, hops, distanceKm, onReplay }: TraceSummary
           <span className="summary__value">
             {state.origin ? `${flag(state.origin.countryCode)} ${where(state.origin)}` : "This machine"}
           </span>
-          {state.origin && <span className="summary__sub mono">{state.origin.ip}</span>}
+          {state.origin && <span className="summary__sub mono">{state.origin.ip || state.origin.isp}</span>}
         </div>
         <div className="summary__end">
           <span className="summary__label">To</span>

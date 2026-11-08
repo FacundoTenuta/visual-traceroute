@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildStyle, EMPTY } from "./map-style";
 
-const style = buildStyle("dark", { segments: EMPTY, stops: EMPTY, origin: EMPTY }, null);
+const style = buildStyle("dark", { segments: EMPTY, stops: EMPTY, origin: EMPTY, probes: EMPTY }, null, "es-madrid");
 const layer = (id: string) => style.layers.find((l) => l.id === id) as { layout?: Record<string, unknown> };
 
 describe("map labels", () => {
@@ -61,5 +61,20 @@ describe("pins and clusters", () => {
   it("switches pin number colour for contrast on slow (red) pins", () => {
     const color = JSON.stringify((find("stops-label")?.paint as Record<string, unknown>)["text-color"]);
     expect(color).toContain('"rtt"');
+  });
+});
+
+describe("probe locations", () => {
+  const ids = style.layers.map((l) => l.id);
+
+  it("draws probe cities as dots below the route", () => {
+    expect((style.sources as Record<string, unknown>).probes).toMatchObject({ type: "geojson" });
+    expect(ids.indexOf("probes")).toBeGreaterThan(-1);
+    expect(ids.indexOf("probes")).toBeLessThan(ids.indexOf("route-ground"));
+  });
+
+  it("rings the chosen origin", () => {
+    const ring = style.layers.find((l) => l.id === "probes-selected") as { filter?: unknown };
+    expect(JSON.stringify(ring.filter)).toContain('"es-madrid"');
   });
 });

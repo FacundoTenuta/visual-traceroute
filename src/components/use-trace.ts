@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useReducer, useRef } from "react";
+import { traceUrl, type TraceOrigin } from "@/lib/client/origins";
 import { SseDecoder } from "@/lib/client/sse";
 import { initialTraceState, traceReducer } from "@/lib/client/trace-state";
 import type { TraceEvent } from "@/lib/traceroute/types";
@@ -16,14 +17,14 @@ export function useTrace() {
     dispatch({ type: "cancel" });
   }, []);
 
-  const start = useCallback(async (target: string) => {
+  const start = useCallback(async (target: string, origin: TraceOrigin) => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     dispatch({ type: "begin", target });
 
     try {
-      const res = await fetch(`/api/trace?target=${encodeURIComponent(target)}`, { signal: controller.signal });
+      const res = await fetch(traceUrl(target, origin), { signal: controller.signal });
       if (!res.ok || !res.body) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         dispatch({ type: "fail", message: body?.error ?? `The trace could not start (HTTP ${res.status}).` });

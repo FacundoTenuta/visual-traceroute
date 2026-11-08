@@ -5,6 +5,7 @@ import type { MapboxOverlay } from "@deck.gl/mapbox";
 import type { GeoJSONSource, Map as MapLibreMap } from "maplibre-gl";
 import { useEffect, useRef } from "react";
 import { formatMs } from "@/lib/format";
+import type { ProbeLocation } from "@/lib/globalping/catalog";
 import { sliceLine, zoomForSpan, type LngLat, type Position3, type RouteGeometry, type RouteStop } from "@/lib/geo/route";
 import { latencyRgba } from "@/lib/latency-scale";
 import { buildStyle, EMPTY, type ResolvedTheme, type RouteData } from "./map-style";
@@ -27,6 +28,10 @@ interface TraceMapProps {
   /** Extra padding (px) taken by floating UI, so the route is framed in the visible area. */
   padding: { top: number; right: number; bottom: number; left: number };
   onSelectHop(hop: number): void;
+  /** Cities with probes (pickable trace origins) and the chosen one. */
+  probeLocations: ProbeLocation[];
+  selectedOrigin: string | null;
+  onPickOrigin(locationId: string): void;
 }
 
 // Start downloading maplibre as soon as this module loads, in parallel with hydration.
@@ -135,13 +140,25 @@ interface Pulse {
   color: Rgba;
 }
 
-export function TraceMap({ theme, route, finished, replay, selectedHop, focus, padding, onSelectHop }: TraceMapProps) {
+export function TraceMap({
+  theme,
+  route,
+  finished,
+  replay,
+  selectedHop,
+  focus,
+  padding,
+  onSelectHop,
+  probeLocations,
+  selectedOrigin,
+  onPickOrigin,
+}: TraceMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const overlayRef = useRef<MapboxOverlay | null>(null);
   const deckRef = useRef<DeckModules | null>(null);
-  const dataRef = useRef<RouteData>({ segments: EMPTY, stops: EMPTY, origin: EMPTY });
-  const latest = useRef({ theme, selectedHop, padding, onSelectHop, finished });
+  const dataRef = useRef<RouteData>({ segments: EMPTY, stops: EMPTY, origin: EMPTY, probes: EMPTY });
+  const latest = useRef({ theme, selectedHop, padding, onSelectHop, finished, selectedOrigin, onPickOrigin });
   /** When each segment (by key) starts drawing, and how long it takes. */
   const schedule = useRef(new Map<string, { start: number; duration: number }>());
   const queueEnd = useRef(0);
@@ -152,7 +169,7 @@ export function TraceMap({ theme, route, finished, replay, selectedHop, focus, p
   const replayed = useRef(replay);
 
   useEffect(() => {
-    latest.current = { theme, selectedHop, padding, onSelectHop, finished };
+    latest.current = { theme, selectedHop, padding, onSelectHop, finished, selectedOrigin, onPickOrigin };
   });
 
   // Create the map once; maplibre is loaded lazily because it needs `window`.
@@ -162,10 +179,10 @@ export function TraceMap({ theme, route, finished, replay, selectedHop, focus, p
 
     maplibrePromise?.then(({ default: maplibregl }) => {
       if (cancelled || !containerRef.current) return;
-      const { theme: initialTheme, selectedHop: initialHop } = latest.current;
+      const { theme: initialTheme, selectedHop: initialHop, selectedOrigin: initialOrigin } = latest.current;
       map = new maplibregl.Map({
         container: containerRef.current,
-        style: buildStyle(initialTheme, dataRef.current, initialHop),
+        style: buildStyle(initialTheme, dataRef.current, initialHop, initialOrigin),
         center: initialCenter(),
         zoom: 2.3,
         minZoom: 1,
@@ -203,6 +220,25 @@ export function TraceMap({ theme, route, finished, replay, selectedHop, focus, p
           tooltip.remove();
         });
       }
+      // Probe cities: hover to see where a trace would start, click to pick it.
+      map.on("click", "probes", (e) => {
+        const id = e.features?.[0]?.properties?.id;
+        if (typeof id === "string") latest.current.onPickOrigin(id);
+      });
+      map.on("mouseenter", "probes", () => map && (map.getCanvas().style.cursor = "pointer"));
+      map.on("mouseleave", "probes", () => {
+        if (map) map.getCanvas().style.cursor = "";
+        tooltip.remove();
+      });
+      map.on("mousemove", "probes", (e) => {
+        const feature = e.features?.[0];
+        if (!map || !feature || feature.geometry.type !== "Point") return;
+        const p = feature.properties ?? {};
+        const root = Object.assign(document.createElement("div"), { className: "pin-tip" });
+        root.append(Object.assign(document.createElement("strong"), { textContent: `Trace from ${p.label}` }));
+        root.append(Object.assign(document.createElement("span"), { textContent: `${p.probes} probe${p.probes === 1 ? "" : "s"} · ${p.network}` }));
+        tooltip.setLngLat(feature.geometry.coordinates as LngLat).setDOMContent(root).addTo(map);
+      });
       map.on("mousemove", "stops", (e) => {
         const feature = e.features?.[0];
         if (!map || !feature || feature.geometry.type !== "Point") return;
@@ -228,8 +264,36 @@ export function TraceMap({ theme, route, finished, replay, selectedHop, focus, p
 
   // Theme or selection change: diff the whole style, keeping current route data.
   useEffect(() => {
-    mapRef.current?.setStyle(buildStyle(theme, dataRef.current, selectedHop), { diff: true });
-  }, [theme, selectedHop]);
+    mapRef.current?.setStyle(buildStyle(theme, dataRef.current, selectedHop, selectedOrigin), { diff: true });
+  }, [theme, selectedHop, selectedOrigin]);
+
+  // Picking a trace origin turns the globe to it, unless a route is on screen.
+  useEffect(() => {
+    const map = mapRef.current;
+    const location = probeLocations.find((l) => l.id === selectedOrigin);
+    if (!map || !location || route.stops.length > 0) return;
+    map.easeTo({ center: [location.lon, location.lat], zoom: Math.max(map.getZoom(), 2.6), pitch: 0, duration: 1200 });
+    // Only react to a new choice, not to route or list updates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedOrigin]);
+
+  // Probe cities change rarely (once loaded); push them on their own.
+  useEffect(() => {
+    const probes: GeoJSON.FeatureCollection = {
+      type: "FeatureCollection",
+      features: probeLocations.map((l) => ({
+        type: "Feature",
+        properties: { id: l.id, label: `${l.city}, ${l.country}`, probes: l.probes, network: l.networks[0]?.network ?? "" },
+        geometry: { type: "Point", coordinates: [l.lon, l.lat] },
+      })),
+    };
+    dataRef.current = { ...dataRef.current, probes };
+    const map = mapRef.current;
+    const apply = () => (map?.getSource("probes") as GeoJSONSource | undefined)?.setData(probes);
+    if (!map) return;
+    if (map.isStyleLoaded()) apply();
+    else map.once("idle", apply);
+  }, [probeLocations]);
 
   // Fly to a stop the user picked in the panel, straight down, at city level.
   useEffect(() => {
@@ -297,9 +361,9 @@ export function TraceMap({ theme, route, finished, replay, selectedHop, focus, p
     }, 0);
 
     let pinsKey = "";
-    const pushMapData = (data: RouteData, key: string) => {
+    const pushMapData = (data: Omit<RouteData, "probes">, key: string) => {
       const map = mapRef.current;
-      dataRef.current = data;
+      dataRef.current = { ...dataRef.current, ...data };
       if (!map) return;
       (map.getSource("segments") as GeoJSONSource | undefined)?.setData(data.segments);
       // Pins only change when one is reached: re-clustering every frame would flicker.

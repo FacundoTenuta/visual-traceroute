@@ -2,6 +2,7 @@
 
 import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { selectHops } from "@/lib/client/trace-state";
+import type { TraceOrigin } from "@/lib/client/origins";
 import { buildRoute } from "@/lib/geo/route";
 import { TraceMap, type MapFocus } from "./map/trace-map";
 import { HopList } from "./panel/hop-list";
@@ -9,6 +10,8 @@ import { LatencyLegend } from "./panel/latency-legend";
 import { SearchForm } from "./panel/search-form";
 import { ThemeSwitch } from "./panel/theme-switch";
 import { TraceSummary } from "./panel/trace-summary";
+import { OriginPicker } from "./panel/origin-picker";
+import { useProbes } from "./use-probes";
 import { useTheme } from "./use-theme";
 import { useTrace } from "./use-trace";
 
@@ -37,6 +40,19 @@ export function TraceApp() {
   const theme = useTheme();
   const [selectedHop, setSelectedHop] = useState<number | null>(null);
   const [focus, setFocus] = useState<MapFocus | null>(null);
+  const probes = useProbes();
+  /** Where traces start; until the user picks, this computer if possible, else the nearest probe city. */
+  const [chosenOrigin, setChosenOrigin] = useState<TraceOrigin | null>(null);
+  const origin = useMemo<TraceOrigin | null>(
+    () =>
+      chosenOrigin ??
+      (probes.local
+        ? { kind: "local" }
+        : probes.nearest
+          ? { kind: "remote", locationId: probes.nearest }
+          : null),
+    [chosenOrigin, probes.local, probes.nearest],
+  );
   /** Bumped by "Replay route"; the map redraws the route from the start. */
   const [replay, setReplay] = useState(0);
   const narrow = useIsNarrow();
@@ -50,9 +66,10 @@ export function TraceApp() {
   const trace = useCallback(
     (target: string) => {
       setSelectedHop(null);
-      void start(target);
+      // Before the location list arrives, local is the only sensible default.
+      void start(target, origin ?? { kind: "local" });
     },
-    [start],
+    [start, origin],
   );
 
   const selectHop = useCallback(
@@ -76,6 +93,9 @@ export function TraceApp() {
         focus={focus}
         padding={narrow ? MOBILE_PADDING : DESKTOP_PADDING}
         onSelectHop={selectHop}
+        probeLocations={probes.locations}
+        selectedOrigin={origin?.kind === "remote" ? origin.locationId : null}
+        onPickOrigin={(locationId) => !running && setChosenOrigin({ kind: "remote", locationId })}
       />
 
       <aside className="panel" aria-label="Trace details">
@@ -91,6 +111,7 @@ export function TraceApp() {
         </header>
 
         <SearchForm running={running} onTrace={trace} onStop={stop} />
+        <OriginPicker origin={origin} probes={probes} disabled={running} onChange={setChosenOrigin} />
 
         <div className="panel__scroll">
           {state.status === "idle" ? (
@@ -99,7 +120,10 @@ export function TraceApp() {
                 See the path your packets take to any server. Every router that answers appears on the globe with its
                 location, network and round-trip time.
               </p>
-              <p className="intro__note">Traces start from the computer running this app.</p>
+              <p className="intro__note">
+                Pick where the trace starts: this computer, or any of {probes.locations.length ? probes.locations.length.toLocaleString("en-US") : "1,000+"} cities with
+                probes. You can also click a dot on the globe.
+              </p>
               <div className="intro__suggestions" aria-label="Try a host">
                 {SUGGESTIONS.map((host) => (
                   <button key={host} type="button" className="chip" onClick={() => trace(host)}>

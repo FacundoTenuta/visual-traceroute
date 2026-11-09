@@ -2,6 +2,42 @@
 
 Trace the network path to any host and follow every hop on a 3D globe that turns into a street map as you zoom in.
 
+**Live:** https://traceroute.facundotenuta.dev
+
+![A trace from Tokyo to Roubaix, France, drawing hop by hop across the Pacific and the Atlantic](docs/trace.gif)
+
+<table>
+  <tr>
+    <td><img src="docs/route-light.webp" alt="The finished Tokyo to Roubaix route on the globe, light theme"></td>
+    <td><img src="docs/hop-map-dark.webp" alt="Zoomed in on one hop near Montreal, where the globe has become a street map, dark theme"></td>
+  </tr>
+</table>
+
+## How it works
+
+A browser cannot send packets with a limited TTL, so the trace never runs in the visitor's browser. It runs on a server or on a measurement probe, and the browser only draws what comes back.
+
+1. **Run the trace.** Either the system `traceroute` on the machine running the app, or a [Globalping](https://globalping.io) probe in any of ~1,100 cities. Both produce traceroute text, so one parser handles both.
+2. **Stream the hops.** `/api/trace` sends Server-Sent Events: each hop is sent as soon as it is parsed, and sent again whenever it gains reverse DNS or a location.
+3. **Draw the route.** MapLibre renders the globe and the vector map; deck.gl draws the 3D arcs on top. The camera stays top-down and follows the line as it grows; tilting is left to the visitor.
+
+## Design decisions
+
+- **Every trace is a fresh measurement.** Results are never cached, because the tool exists to measure the network as it is now. Abuse is limited instead: each visitor may start 10 remote traces per hour, at most 3 traces run at once, and a trace stops after 150 seconds.
+- **Arcs follow the sphere.** Repeated or back-and-forth segments are fanned out symmetrically by rotating them around the great-circle normal, not shifted in longitude/latitude, so they stay clean near the poles.
+- **One colour per segment.** Each line takes the round-trip time of the hop it reaches, on a cyan-to-red scale. A gradient inside one line would suggest a latency change that was never measured.
+- **Untrusted input never reaches a shell.** The target is validated as a hostname or IPv4 address and passed as an argument array. Remote origins are accepted only as ids from the probe catalogue, so no free text reaches the Globalping API.
+- **The API token stays on the server.** `GLOBALPING_TOKEN` is read in one server-only module and never sent to the browser.
+- **Honest geography.** Hop locations come from IP registries, so a backbone router can appear where its address is registered rather than where it is (see Limits). The map labels the Islas Malvinas and the other South Atlantic islands by their Argentine names and draws disputed borders dashed.
+
+## Stack
+
+Next.js 16 (App Router, route handlers streaming SSE), React 19, TypeScript, MapLibre GL 5 (globe projection, [OpenFreeMap](https://openfreemap.org) tiles), deck.gl 9, Vitest (232 tests). Deployed on Vercel.
+
+The requirements, task list and decision log, including every correction made along the way, are in [odd/tasks/visual-traceroute.md](odd/tasks/visual-traceroute.md).
+
+## Trace origins
+
 Pick where the trace starts:
 
 - **This computer**: the server runs the system `traceroute` and streams each hop as it answers (local or self-hosted installs).

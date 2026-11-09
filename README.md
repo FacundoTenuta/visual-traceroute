@@ -32,7 +32,7 @@ A browser cannot send packets with a limited TTL, so the trace never runs in the
 
 ## Stack
 
-Next.js 16 (App Router, route handlers streaming SSE), React 19, TypeScript, MapLibre GL 5 (globe projection, [OpenFreeMap](https://openfreemap.org) tiles), deck.gl 9, Vitest (232 tests). Deployed on Vercel.
+Next.js 16 (App Router, route handlers streaming SSE), React 19, TypeScript, MapLibre GL 5 (globe projection, [OpenFreeMap](https://openfreemap.org) tiles), deck.gl 9, Vitest (251 tests). Deployed on Vercel.
 
 ## Trace origins
 
@@ -73,7 +73,7 @@ Before using it commercially, note that ip-api's free endpoint is for non-commer
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in what you need; every variable is optional. `.env` is git-ignored, and none of these values is sent to the browser.
+Copy `.env.example` to `.env` and fill in what you need; every variable is optional. `.env` is git-ignored, and none of these values is sent to the browser except `NEXT_PUBLIC_GA_IDS`, which is public by design.
 
 | Variable | Effect |
 | --- | --- |
@@ -82,6 +82,31 @@ Copy `.env.example` to `.env` and fill in what you need; every variable is optio
 | `REMOTE_TRACES_PER_HOUR` | Remote traces each visitor may start per sliding hour (default `10`). Protects the Globalping quota every visitor shares. |
 | `TRACE_LOCAL` | Set to `0` to turn off traces from this computer (they are offered automatically when `traceroute` is found on the `PATH`). |
 | `TRUST_PROXY` | Set to `1` only behind a proxy that overwrites `X-Forwarded-For`. Enables the per-client limit; otherwise forwarding headers are ignored because any caller could forge them. |
+| `NEXT_PUBLIC_GA_IDS` | Comma-separated Google Analytics 4 measurement ids, read at build time (see Analytics). Unset: no analytics script and no events. |
+
+## Analytics
+
+Production sends Google Analytics 4 events to the ids in `NEXT_PUBLIC_GA_IDS` (comma-separated; `traceroute.facundotenuta.dev` uses the global `facundotenuta.dev` property, `G-4RGE1D3764`). The variable is read at build time, so changing it needs a new build.
+
+- **Without it** (local development, previews) the page loads no Google script and every event is a no-op.
+- **With it** `gtag.js` loads once after the page is interactive and each id gets one `config`. Page views, scrolls and outbound clicks come from GA4 enhanced measurement; no manual `page_view` is sent. The cookie stays on the registrable domain (`cookie_domain: auto`), so a visitor keeps one client id across `*.facundotenuta.dev`.
+- **No personal data.** A typed hostname is sent; a typed IP address is reported only as `target_type: "ip"`, and other free text only as `"invalid"`. No hop, origin or destination addresses are sent. Strings are capped at 100 characters.
+
+All custom events go through `track()` in `src/lib/client/analytics.ts`. Register the params as custom dimensions (text) or metrics (numbers) in the GA property to report on them.
+
+| Event | When | Params |
+| --- | --- | --- |
+| `trace_start` | A trace is requested (Trace button, Enter, or a sample host) | `origin_type` (`local`/`remote`), `origin_city`, `origin_country`, `asn` (remote only, when a network was picked), `target_type` (`hostname`/`ip`/`invalid`), `target_host` (hostnames only) |
+| `trace_complete` | Once, when the stream sends `done` | `origin_type`, `origin_city`, `hops`, `reached`, `distance_km` (rounded), `countries`, `duration_ms` |
+| `trace_error` | `/api/trace` refuses, the stream sends `error`, or the connection drops | `status` (HTTP status, `0` when the request never got one), `reason`: `validation` (400), `rate_limit` (429, concurrency), `quota` (429 with `retry-after`, hourly remote limit), `unavailable` (503), `http` (other status), `stream` (stream `error` event), `network` (fetch failed or the stream closed early) |
+| `origin_select` | A location, "This computer", "Near you" or a network is picked in the "From" list | `origin_type`, `origin_city`, `origin_country`, `asn` |
+| `probe_dot_click` | A probe city dot is clicked on the globe | `city`, `country` |
+| `sample_target_click` | A sample host chip is clicked (followed by `trace_start`) | `target` |
+| `hop_select` | A hop row or a hop pin on the map is selected | `hop` |
+| `replay_route` | "Replay route" is clicked | — |
+| `theme_change` | The theme switch changes value | `theme` (`system`/`light`/`dark`) |
+
+The site has no language switch, calls to action or sectioned pages, so the shared `language_change`, `cta_click` and `section_view` events do not apply here.
 
 ## Scripts
 

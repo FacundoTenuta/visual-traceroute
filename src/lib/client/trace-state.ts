@@ -67,3 +67,8 @@ export function traceReducer(state: TraceState, action: TraceAction): TraceState
 export function selectHops(state: TraceState): EnrichedHop[] {
   return Object.values(state.hops).sort((a, b) => a.hop - b.hop);
 }
+
+/** Distinct countries among every responding address of the route. */
+export function countHopCountries(hops: EnrichedHop[]): number {
+  return new Set(hops.flatMap((h) => h.addresses.map((a) => a.geo?.countryCode).filter(Boolean))).size;
+}

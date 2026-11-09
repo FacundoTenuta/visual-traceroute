@@ -1,6 +1,6 @@
 "use client";
 
-import type { TraceState } from "@/lib/client/trace-state";
+import { countHopCountries, type TraceState } from "@/lib/client/trace-state";
 import { flag, formatDuration, formatKm, formatMs } from "@/lib/format";
 import type { EnrichedHop, GeoInfo } from "@/lib/traceroute/types";
 
@@ -35,7 +35,7 @@ function statusText(state: TraceState, hops: EnrichedHop[]): string {
 
 export function TraceSummary({ state, hops, distanceKm, onReplay }: TraceSummaryProps) {
   const lastAnswered = [...hops].reverse().find((h) => h.rtt);
-  const countries = new Set(hops.flatMap((h) => h.addresses.map((a) => a.geo?.countryCode).filter(Boolean)));
+  const countries = countHopCountries(hops);
   const destinationGeo = state.destination?.geo;
 
   return (
@@ -92,7 +92,7 @@ export function TraceSummary({ state, hops, distanceKm, onReplay }: TraceSummary
           </div>
           <div>
             <dt>Countries</dt>
-            <dd>{countries.size || "—"}</dd>
+            <dd>{countries || "—"}</dd>
           </div>
         </dl>
       )}

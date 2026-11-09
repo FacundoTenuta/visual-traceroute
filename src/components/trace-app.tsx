@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { track, type AnalyticsParams } from "@/lib/client/analytics";
+import { originParams, traceCompleteParams, traceStartParams } from "@/lib/client/trace-analytics";
 import { selectHops } from "@/lib/client/trace-state";
 import type { TraceOrigin } from "@/lib/client/origins";
 import { buildRoute } from "@/lib/geo/route";
@@ -12,7 +14,7 @@ import { ThemeSwitch } from "./panel/theme-switch";
 import { TraceSummary } from "./panel/trace-summary";
 import { OriginPicker } from "./panel/origin-picker";
 import { useProbes } from "./use-probes";
-import { useTheme } from "./use-theme";
+import { useTheme, type ThemePreference } from "./use-theme";
 import { useTrace } from "./use-trace";
 
 const SUGGESTIONS = ["cloudflare.com", "github.com", "bbc.co.uk", "www.u-tokyo.ac.jp", "gov.br"];
@@ -63,17 +65,60 @@ export function TraceApp() {
   const finished = state.status === "done" || state.status === "cancelled";
   const canReplay = finished && route.segments.features.length > 0;
 
+  /** `trace_start` params of the trace still owed a `trace_complete`; cleared once it is sent or the trace ends otherwise. */
+  const pendingTrace = useRef<AnalyticsParams | null>(null);
+
   const trace = useCallback(
     (target: string) => {
       setSelectedHop(null);
       // Before the location list arrives, local is the only sensible default.
-      void start(target, origin ?? { kind: "local" });
+      const from = origin ?? { kind: "local" };
+      const params = traceStartParams(target, from, probes.locations);
+      pendingTrace.current = params;
+      track("trace_start", params);
+      void start(target, from);
     },
-    [start, origin],
+    [start, origin, probes.locations],
+  );
+
+  // One `trace_complete` per trace: the ref is cleared as soon as it is sent, so
+  // re-renders and re-run effects cannot report the same trace twice.
+  useEffect(() => {
+    const started = pendingTrace.current;
+    if (!started || state.status === "running" || state.status === "idle") return;
+    pendingTrace.current = null;
+    if (state.status === "done") track("trace_complete", traceCompleteParams(state, hops, route.distanceKm, started));
+  }, [state, hops, route.distanceKm]);
+
+  const changeTheme = useCallback(
+    (next: ThemePreference) => {
+      if (next !== theme.preference) track("theme_change", { theme: next });
+      theme.setPreference(next);
+    },
+    [theme],
+  );
+
+  const pickOriginOnMap = useCallback(
+    (locationId: string) => {
+      if (running) return;
+      const location = probes.locations.find((l) => l.id === locationId);
+      track("probe_dot_click", { city: location?.city, country: location?.country });
+      setChosenOrigin({ kind: "remote", locationId });
+    },
+    [running, probes.locations],
+  );
+
+  const pickOrigin = useCallback(
+    (next: TraceOrigin) => {
+      track("origin_select", originParams(next, probes.locations));
+      setChosenOrigin(next);
+    },
+    [probes.locations],
   );
 
   const selectHop = useCallback(
     (hop: number) => {
+      track("hop_select", { hop });
       setSelectedHop(hop);
       const stop = route.stops.find((s) => s.hops.includes(hop));
       if (stop) setFocus({ coord: stop.coord, nonce: Date.now() });
@@ -95,7 +140,7 @@ export function TraceApp() {
         onSelectHop={selectHop}
         probeLocations={probes.locations}
         selectedOrigin={origin?.kind === "remote" ? origin.locationId : null}
-        onPickOrigin={(locationId) => !running && setChosenOrigin({ kind: "remote", locationId })}
+        onPickOrigin={pickOriginOnMap}
       />
 
       <aside className="panel" aria-label="Trace details">
@@ -107,11 +152,11 @@ export function TraceApp() {
             </svg>
             <h1>Visual traceroute</h1>
           </div>
-          <ThemeSwitch value={theme.preference} onChange={theme.setPreference} />
+          <ThemeSwitch value={theme.preference} onChange={changeTheme} />
         </header>
 
         <SearchForm running={running} onTrace={trace} onStop={stop} />
-        <OriginPicker origin={origin} probes={probes} disabled={running} onChange={setChosenOrigin} />
+        <OriginPicker origin={origin} probes={probes} disabled={running} onChange={pickOrigin} />
 
         <div className="panel__scroll">
           {state.status === "idle" ? (
@@ -127,7 +172,15 @@ export function TraceApp() {
               </p>
               <div className="intro__suggestions" aria-label="Try a host">
                 {SUGGESTIONS.map((host) => (
-                  <button key={host} type="button" className="chip" onClick={() => trace(host)}>
+                  <button
+                    key={host}
+                    type="button"
+                    className="chip"
+                    onClick={() => {
+                      track("sample_target_click", { target: host });
+                      trace(host);
+                    }}
+                  >
                     {host}
                   </button>
                 ))}
@@ -139,7 +192,14 @@ export function TraceApp() {
                 state={state}
                 hops={hops}
                 distanceKm={route.distanceKm}
-                onReplay={canReplay ? () => setReplay((n) => n + 1) : undefined}
+                onReplay={
+                  canReplay
+                    ? () => {
+                        track("replay_route");
+                        setReplay((n) => n + 1);
+                      }
+                    : undefined
+                }
               />
               <HopList
                 hops={hops}

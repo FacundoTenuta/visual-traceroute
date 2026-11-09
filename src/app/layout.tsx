@@ -1,5 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Red_Hat_Mono, Red_Hat_Text } from "next/font/google";
+import Script from "next/script";
+import { gaInitScript, parseGaIds } from "@/lib/client/analytics";
 import "./globals.css";
 
 const sans = Red_Hat_Text({ variable: "--font-sans", subsets: ["latin"] });
@@ -18,6 +20,9 @@ export const viewport: Viewport = {
 };
 
 // Applies a stored theme before first paint to avoid a flash of the wrong theme.
+/** GA4 measurement ids, inlined at build time; none means no analytics script at all. */
+const gaIds = parseGaIds(process.env.NEXT_PUBLIC_GA_IDS);
+
 const themeScript = `try{var t=localStorage.getItem("vt-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}`;
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
@@ -29,7 +34,20 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <link rel="preconnect" href="https://tiles.openfreemap.org" crossOrigin="anonymous" />
         <link rel="preload" href="https://tiles.openfreemap.org/planet" as="fetch" crossOrigin="anonymous" />
       </head>
-      <body>{children}</body>
+      <body>
+        {children}
+        {gaIds.length > 0 && (
+          <>
+            <Script
+              src={`https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(gaIds[0])}`}
+              strategy="afterInteractive"
+            />
+            <Script id="ga-init" strategy="afterInteractive">
+              {gaInitScript(gaIds)}
+            </Script>
+          </>
+        )}
+      </body>
     </html>
   );
 }

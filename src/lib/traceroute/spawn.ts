@@ -13,7 +13,12 @@ export function spawnTraceroute(target: string, signal: AbortSignal): LineSource
   const child = spawn(
     "traceroute",
     ["-n", "-q", "3", "-w", "2", "-m", String(MAX_HOPS), "--", target],
-    { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, PATH: `/usr/sbin:/usr/bin:/sbin:/bin:${process.env.PATH ?? ""}` } },
+    // Only PATH (and NODE_ENV, which the env type requires) is passed: the child
+    // never needs, or sees, the app's secrets.
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { NODE_ENV: process.env.NODE_ENV, PATH: `/usr/sbin:/usr/bin:/sbin:/bin:${process.env.PATH ?? ""}` },
+    },
   );
 
   const kill = () => child.kill("SIGTERM");

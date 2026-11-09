@@ -34,8 +34,6 @@ A browser cannot send packets with a limited TTL, so the trace never runs in the
 
 Next.js 16 (App Router, route handlers streaming SSE), React 19, TypeScript, MapLibre GL 5 (globe projection, [OpenFreeMap](https://openfreemap.org) tiles), deck.gl 9, Vitest (232 tests). Deployed on Vercel.
 
-The requirements, task list and decision log, including every correction made along the way, are in [odd/tasks/visual-traceroute.md](odd/tasks/visual-traceroute.md).
-
 ## Trace origins
 
 Pick where the trace starts:
@@ -74,6 +72,8 @@ Before using it commercially, note that ip-api's free endpoint is for non-commer
 - Internet access to `ip-api.com` (geolocation), `tiles.openfreemap.org` (map tiles) and `api.globalping.io` (remote traces). No API keys needed.
 
 ## Configuration
+
+Copy `.env.example` to `.env` and fill in what you need; every variable is optional. `.env` is git-ignored, and none of these values is sent to the browser.
 
 | Variable | Effect |
 | --- | --- |
